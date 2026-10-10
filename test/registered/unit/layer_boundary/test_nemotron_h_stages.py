@@ -28,8 +28,8 @@ register_cpu_ci(est_time=3, suite="base-a-test-cpu")
 
 
 def layer_stage(pattern, index):
+    from sglang.srt.layers.layer_boundary.connections import _connect_line
     from sglang.srt.layers.layer_boundary.construction import BatchVariant
-    from sglang.srt.layers.layer_boundary.factories import _connect_line
 
     previous = utils._declaration(pattern, index - 1) if index else None
     declaration = replace(

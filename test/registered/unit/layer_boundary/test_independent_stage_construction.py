@@ -16,9 +16,9 @@ from sglang.srt.layers.layer_boundary import (
     ProducerReduction,
     StageKind,
     append_stages,
+    connections,
     declare_attn,
     declare_ffn,
-    factories,
     layer_stack,
 )
 from sglang.srt.layers.layer_boundary.contracts import BatchVariant
@@ -357,7 +357,7 @@ def binding(stage):
 
 
 def attention_rows(variant):
-    return factories._row_layouts(variant)[1]
+    return connections._row_layouts(variant)[1]
 
 
 class TestPipelineCuts(CustomTestCase):

@@ -11,6 +11,7 @@ from unittest import mock
 from sglang.srt.layers import layer_boundary as communicator
 from sglang.srt.layers.layer_boundary import (
     boundary,
+    connections,
     construction,
     contracts,
     declarations,
@@ -52,6 +53,7 @@ COMMUNICATOR_MODULES = (
     ops,
     boundary,
     construction,
+    connections,
     contracts,
     declarations,
     prepare,
