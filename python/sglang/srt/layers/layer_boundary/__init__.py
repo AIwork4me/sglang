@@ -37,11 +37,10 @@ from sglang.srt.layers.layer_boundary.contracts import (
     StageKind,
     StagePath,
 )
+from sglang.srt.layers.layer_boundary.declarations import declare_attn, declare_ffn
 from sglang.srt.layers.layer_boundary.exit import MixerExit
 from sglang.srt.layers.layer_boundary.factories import (
     append_stages,
-    declare_attn,
-    declare_ffn,
     layer_stack,
 )
 from sglang.srt.layers.layer_boundary.layout import (

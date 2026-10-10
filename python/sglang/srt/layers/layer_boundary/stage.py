@@ -43,7 +43,7 @@ from sglang.srt.runtime_context import get_forward
 
 if TYPE_CHECKING:
     from sglang.srt.layers.layer_boundary.construction import StagePlan
-    from sglang.srt.layers.layer_boundary.factories import StageDeclaration
+    from sglang.srt.layers.layer_boundary.declarations import StageDeclaration
 
 
 class StageBoundary:
