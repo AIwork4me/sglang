@@ -304,7 +304,9 @@ Paths in this table are relative to `python/sglang/srt/layers/layer_boundary/`.
 
 | Module | Role |
 | --- | --- |
-| `factories.py` | Model declarations, local sequence assembly, and stage factories |
+| `declarations.py` | Model stage declarations and residual capability checks |
+| `connections.py` | Resolve token rows and contracts between adjacent declarations |
+| `stack.py` | Collect stages, connect local and PP neighbours, and coordinate binding |
 | `contracts.py` | Resolved input/output contracts, edge declarations, batch variants, and bound step records |
 | `layout.py` | Token axes, layouts, named sum groups, and topology/batch facts |
 | `construction.py` | Build a `StagePlan` and select its batch variant |

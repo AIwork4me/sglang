@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.layers import linear
-from sglang.srt.layers.layer_boundary.factories import layer_stack
+from sglang.srt.layers.layer_boundary import layer_stack
 from sglang.srt.runtime_context import SpawnRanks, reset_context
 from sglang.srt.server_args import ServerArgs
 from sglang.test.ci.ci_register import register_cuda_ci

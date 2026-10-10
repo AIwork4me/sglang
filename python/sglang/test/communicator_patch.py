@@ -16,7 +16,6 @@ from sglang.srt.layers.layer_boundary import (
     contracts,
     declarations,
     exit,
-    factories,
     layout,
     ops,
     output,
@@ -24,6 +23,7 @@ from sglang.srt.layers.layer_boundary import (
 )
 from sglang.srt.layers.layer_boundary import residual as residual_contract
 from sglang.srt.layers.layer_boundary import (
+    stack,
     stage,
 )
 from sglang.srt.layers.layer_boundary.adapters import attention, branch, lora, overlap
@@ -57,7 +57,7 @@ COMMUNICATOR_MODULES = (
     contracts,
     declarations,
     prepare,
-    factories,
+    stack,
     stage,
     batch,
     stream,

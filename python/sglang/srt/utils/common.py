@@ -1580,7 +1580,7 @@ def make_layers(
     """
     # circular imports
     from sglang.srt.distributed import get_pp_indices
-    from sglang.srt.layers.layer_boundary.factories import (
+    from sglang.srt.layers.layer_boundary.stack import (
         check_declared_stages,
         layer_stack,
     )

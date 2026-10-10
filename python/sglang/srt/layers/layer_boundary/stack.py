@@ -1,4 +1,4 @@
-"""Collect model stages and bind their boundary paths."""
+"""Collect model stages, connect neighbours, and bind each stage."""
 
 from __future__ import annotations
 
@@ -21,8 +21,6 @@ from sglang.srt.layers.layer_boundary.contracts import (
     StageKind,
 )
 from sglang.srt.layers.layer_boundary.declarations import StageDeclaration
-from sglang.srt.layers.layer_boundary.declarations import declare_attn as declare_attn
-from sglang.srt.layers.layer_boundary.declarations import declare_ffn as declare_ffn
 from sglang.srt.layers.layer_boundary.facts import facts_of
 from sglang.srt.layers.layer_boundary.stage import StageBoundary
 

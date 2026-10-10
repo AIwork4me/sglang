@@ -39,10 +39,6 @@ from sglang.srt.layers.layer_boundary.contracts import (
 )
 from sglang.srt.layers.layer_boundary.declarations import declare_attn, declare_ffn
 from sglang.srt.layers.layer_boundary.exit import MixerExit
-from sglang.srt.layers.layer_boundary.factories import (
-    append_stages,
-    layer_stack,
-)
 from sglang.srt.layers.layer_boundary.layout import (
     Layout,
     SumGroup,
@@ -73,6 +69,10 @@ from sglang.srt.layers.layer_boundary.residual.ihc import (
 )
 from sglang.srt.layers.layer_boundary.residual.mhc import (
     MHCState,
+)
+from sglang.srt.layers.layer_boundary.stack import (
+    append_stages,
+    layer_stack,
 )
 
 __all__ = [
