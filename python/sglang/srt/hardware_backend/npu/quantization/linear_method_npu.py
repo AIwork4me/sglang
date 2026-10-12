@@ -4,7 +4,11 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import torch
 from torch.nn.parameter import Parameter
 
-from sglang.srt.hardware_backend.npu.utils import NPUACLFormat, npu_format_cast
+from sglang.srt.hardware_backend.npu.utils import (
+    NPUACLFormat,
+    cast_packed_fp4_weight_to_nz,
+    npu_format_cast,
+)
 from sglang.srt.layers.quantization.base_config import LinearMethodBase
 
 if TYPE_CHECKING:
@@ -494,15 +498,11 @@ class NPUMXFP4W4A8LinearMethod(_NPULinearMethodBase):
             weight_fp, dst_type=fp4_dtype, round_mode="round"
         )
 
-        # weight: packed FP4 -> FRACTAL_NZ (float8_e4m3fn view) -> transpose
-        # [in//2, out]. Mirror the offline path (no .contiguous() on the NZ view);
-        # view as uint8 first because npu_format_cast only accepts int-dtype tensors.
-        qw_nz = npu_format_cast(
-            qw.view(torch.uint8),
-            NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=fp4_dtype,
-        )
+        # weight: packed FP4 -> FRACTAL_NZ (int8 view; see
+        # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs)
+        # -> transpose [in//2, out], mirroring the offline path (no
+        # .contiguous() on the NZ view).
+        qw_nz = cast_packed_fp4_weight_to_nz(qw)
         layer.weight = Parameter(qw_nz.transpose(-1, -2), requires_grad=False)
 
         # weight_scale -> [in//64, out, 2] to match npu_quant_matmul.
@@ -585,9 +585,8 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     scales (``uint8`` shape ``[out, in//group_size]``):
 
       process_weights_after_loading:
-        weight (uint8 packed FP4 [out, in//2]) → npu_format_cast(29,
-            customize_dtype=float8_e4m3fn, input_dtype=float4_e2m1fn_x2) → FRACTAL_NZ
-            → transpose [in//2, out]
+        weight (uint8 packed FP4 [out, in//2]) → int8-view FRACTAL_NZ cast
+            (cast_packed_fp4_weight_to_nz) → transpose [in//2, out]
         weight_scale [out, in/32] → reshape [out, in/64, 2] → transpose → [in/64, out, 2]
 
       apply:
@@ -599,8 +598,8 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     scale-layout normalization.
 
     ⚠️ REQUIRES a recent torch_npu build for the FP4 ``npu_quant_matmul``. On the
-    A5 this device forces ``allow_internal_format=False`` (the NZ cast still produces
-    a ``FRACTAL_NZ_C0_16`` tensor, which is fine). Older torch_npu (e.g.
+    A5 this device forces ``allow_internal_format=False`` (the int8-view NZ cast
+    still tags the weight plain ``FRACTAL_NZ``). Older torch_npu (e.g.
     ``2.10.0.dev20260320``) had a broken FP4 matmul that rejected the NZ weight in
     *prefill* with ``x2 should be in ... nz format, but it is 2``;
     ``2.10.0.post1.dev20260624`` (and later) runs the FRACTAL_NZ path correctly.
@@ -623,20 +622,12 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Cast the packed-FP4 weight to FRACTAL_NZ then transpose. All NPU ops go
-        # through torch.ops.npu.* (no torch_npu). A recent torch_npu build is
-        # required (see class docstring): older builds reject the NZ weight
-        # ("x2 ... it is 2").
-        fp4_dtype = _get_float4_e2m1fn_x2_dtype()
-
-        # weight: packed-FP4 uint8 [out, in//2] -> FRACTAL_NZ (float8_e4m3fn view)
-        # -> transpose to [in//2, out].
-        layer.weight.data = npu_format_cast(
-            layer.weight.data,
-            NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=fp4_dtype,
-        )
+        # Cast the packed-FP4 weight to FRACTAL_NZ (int8 view; see
+        # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs) then
+        # transpose to [in//2, out]. All NPU ops go through torch.ops.npu.*
+        # (no torch_npu). A recent torch_npu build is still required (see class
+        # docstring): older builds reject the NZ weight ("x2 ... it is 2").
+        layer.weight.data = cast_packed_fp4_weight_to_nz(layer.weight.data)
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         # weight_scale: [out, in/32] uint8 -> [in/64, out, 2].
         n, k = layer.weight_scale.data.shape
@@ -769,18 +760,12 @@ class NPUSingleLevelMXFP4LinearMethod(_NPULinearMethodBase):
         qw, w_scale = torch.ops.npu.npu_dynamic_mx_quant(
             weight_fp, dst_type=fp4_dtype, round_mode="round"
         )
-        # Lay the packed FP4 weight out as FRACTAL_NZ, mirroring the W4A8
-        # path, then transpose to [in//2, out] for npu_quant_matmul. The NZ
-        # layout keeps the fp4 GEMM on the Cube-friendly data path on A5.
-        # Requires a torch_npu build whose fp4 npu_quant_matmul accepts an NZ
-        # x2 (same caveat as the W4A8 path below); on older builds revert
-        # this to the plain ND transpose view.
-        qw_nz = npu_format_cast(
-            qw.view(torch.uint8),
-            NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=fp4_dtype,
-        )
+        # Lay the packed FP4 weight out as FRACTAL_NZ (int8 view; see
+        # cast_packed_fp4_weight_to_nz), mirroring the W4A8 path, then
+        # transpose to [in//2, out] for npu_quant_matmul. The NZ layout keeps
+        # the fp4 GEMM on the Cube-friendly data path on A5 (same torch_npu
+        # build caveat as the W4A8 path).
+        qw_nz = cast_packed_fp4_weight_to_nz(qw)
         layer.weight = Parameter(qw_nz.transpose(-1, -2), requires_grad=False)
 
         # weight_scale -> [in//64, out, 2] (3D), matching the offline W4A4 and
@@ -857,14 +842,10 @@ class NPUSingleLevelMXFP4OfflineLinearMethod(NPUSingleLevelMXFP4LinearMethod):
         if not weight.is_npu:
             weight = weight.to(f"npu:{torch.npu.current_device()}")
         # The checkpoint is already packed two-FP4-per-byte [out, in//2].
-        # Cast to FRACTAL_NZ (same layout as the W4A8 offline kernel) and
-        # transpose to [in//2, out] for npu_quant_matmul.
-        weight = npu_format_cast(
-            weight,
-            NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=_get_float4_e2m1fn_x2_dtype(),
-        )
+        # Cast to FRACTAL_NZ (int8 view; same layout as the W4A8 offline
+        # kernel — see cast_packed_fp4_weight_to_nz) and transpose to
+        # [in//2, out] for npu_quant_matmul.
+        weight = cast_packed_fp4_weight_to_nz(weight)
         layer.weight = Parameter(weight.transpose(-1, -2), requires_grad=False)
 
         weight_scale = layer.weight_scale.data

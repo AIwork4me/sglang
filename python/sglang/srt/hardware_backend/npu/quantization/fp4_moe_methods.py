@@ -140,8 +140,6 @@ class NPUW4A8MXFP4FusedMoEMethod(FusedMoEMethodBase):
         self.runner = MoeRunner(backend, moe_runner_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from sglang.srt.hardware_backend.npu.utils import NPUACLFormat
-
         if layer.w13_weight_scale_inv.data.max() == 0:
             raise RuntimeError(
                 f"FP4 expert weight scales are all zero (never loaded) for "
@@ -155,16 +153,13 @@ class NPUW4A8MXFP4FusedMoEMethod(FusedMoEMethodBase):
                 "not match w2_weight_scale_inv."
             )
 
-        nz_format = NPUACLFormat.ACL_FORMAT_FRACTAL_NZ
         layer.w13_weight.data, w13_scale = prepare_w4a8_mxfp_weight(
             layer.w13_weight.data.view(torch.uint8),
             layer.w13_weight_scale_inv.data,
-            npu_format=nz_format,
         )
         layer.w2_weight.data, w2_scale = prepare_w4a8_mxfp_weight(
             layer.w2_weight.data.view(torch.uint8),
             layer.w2_weight_scale_inv.data,
-            npu_format=nz_format,
         )
         layer.w13_weight_scale_inv = torch.nn.Parameter(w13_scale, requires_grad=False)
         layer.w2_weight_scale_inv = torch.nn.Parameter(w2_scale, requires_grad=False)

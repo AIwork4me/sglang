@@ -5,7 +5,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from sglang.srt.environ import envs
-from sglang.srt.hardware_backend.npu.utils import npu_format_cast
+from sglang.srt.hardware_backend.npu.utils import (
+    cast_packed_fp4_weight_to_nz,
+    npu_format_cast,
+)
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 
 if TYPE_CHECKING:
@@ -82,18 +85,9 @@ def reshape_w4a8_mxfp_weight_scale_for_npu(scale: torch.Tensor) -> torch.Tensor:
 def prepare_w4a8_mxfp_weight(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    *,
-    npu_format=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Convert W4A8 MXFP weights and scales to the shared A5 GMM layout."""
-    cast_args = {
-        "customize_dtype": torch.float8_e4m3fn,
-        "input_dtype": _get_float4_e2m1fn_x2_dtype(),
-    }
-    if npu_format is None:
-        weight = npu_format_cast(weight, **cast_args)
-    else:
-        weight = npu_format_cast(weight, npu_format, **cast_args)
+    weight = cast_packed_fp4_weight_to_nz(weight)
     return weight.transpose(-1, -2), reshape_w4a8_mxfp_weight_scale_for_npu(
         weight_scale
     )

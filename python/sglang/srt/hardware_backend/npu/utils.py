@@ -263,12 +263,12 @@ def npu_format_cast(
     Args:
         tensor (torch.Tensor): The input tensor.
         acl_format (NPUACLFormat): The target NPU ACL format.
-        customize_dtype / input_dtype: packed-FP4 unpack kwargs (e.g.
-            ``customize_dtype=torch.float8_e4m3fn``,
-            ``input_dtype=torch.float4_e2m1fn_x2``). When either is set the unpack
-            kwargs are forwarded to the op and the ``_is_nz_aligned`` ND fallback
-            is skipped: the FP4 matmul strictly requires FRACTAL_NZ, so a silent
-            ND fallback would corrupt results.
+        customize_dtype / input_dtype: carrier-dtype kwargs (e.g.
+            ``customize_dtype=torch.int8``, ``input_dtype=torch.int8`` for the
+            packed-FP4 view). When either is set the kwargs are forwarded to the
+            op and the ``_is_nz_aligned`` ND fallback is skipped: quant matmuls
+            strictly require FRACTAL_NZ, so a silent ND fallback would corrupt
+            results.
 
     Returns:
         torch.Tensor: The tensor cast to the specified NPU ACL format.
@@ -292,8 +292,8 @@ def npu_format_cast(
     if tensor.device.type == "meta":
         return tensor
 
-    # Packed-FP4 → FRACTAL_NZ: forward the unpack kwargs to the op, and skip the
-    # _is_nz_aligned ND fallback — the FP4 matmul strictly requires NZ, so a
+    # Carrier-dtype-explicit casts (e.g. the packed-FP4 int8 view) skip the
+    # _is_nz_aligned ND fallback — the quant matmuls strictly require NZ, so a
     # silent ND fallback would corrupt results.
     if customize_dtype is not None or input_dtype is not None:
         return torch.ops.npu.npu_format_cast(
@@ -316,6 +316,28 @@ def npu_format_cast(
         return tensor
 
     return torch.ops.npu.npu_format_cast(tensor, acl_format.value)
+
+
+def cast_packed_fp4_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
+    """Lay a packed-FP4 weight (``[out, in//2]`` uint8/int8) out as FRACTAL_NZ.
+
+    The cast goes through the int8 view, never the fp4 unpack kwargs
+    (``customize_dtype=float8_e4m3fn, input_dtype=float4_e2m1fn_x2``): on
+    CANN >= 9.2 that cast tags the result ``FRACTAL_NZ_C0_32``, which the
+    quant matmuls reject — op-plugin's ``is_nz_format`` only allows
+    ``{FRACTAL_NZ, C0_2, C0_4, C0_16}`` and ``aclnnQuantMatmulWeightNz``
+    fails a C0_32 x2 with EZ0035 (torch_npu master hides this by remapping
+    C0_32→C0_16 for 4-bit casts; released builds don't). Plain NZ over the
+    byte carrier is the real contract: the aclnn unpacks the nibbles itself
+    (k = bytes * 2), the same recipe ``npu_dual_level_quant_matmul`` weights
+    already use.
+    """
+    return npu_format_cast(
+        weight.view(torch.int8),
+        NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
+        customize_dtype=torch.int8,
+        input_dtype=torch.int8,
+    )
 
 
 def get_indexer_weight_stream():

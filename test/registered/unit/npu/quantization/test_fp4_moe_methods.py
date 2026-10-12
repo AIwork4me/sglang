@@ -131,7 +131,7 @@ class TestPrepareW4A8MxfpWeight(unittest.TestCase):
         formatted_weight = torch.arange(16, dtype=torch.uint8).view(1, 2, 8)
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            "sglang.srt.hardware_backend.npu.quantization.moe_methods.cast_packed_fp4_weight_to_nz",
             return_value=formatted_weight,
         ):
             prepared_weight, prepared_scale = prepare_w4a8_mxfp_weight(weight, scale)
