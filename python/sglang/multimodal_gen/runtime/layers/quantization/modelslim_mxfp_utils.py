@@ -1,5 +1,21 @@
 """Inference options for offline ModelSlim MXFP checkpoints."""
 
+# msmodelslim names the exported rotations after the to_q/to_k projections
+# (`to_q_rot`/`to_k_rot`); earlier exports used `q_rot`/`k_rot`. The Wan weight
+# mapping (configs/models/dits/wanvideo.py) accepts both spellings, so
+# descriptor lookups must too -- a missed lookup leaves the rotation buffers
+# unregistered and the tensors are silently skipped at load.
+_ROTATION_DESCRIPTOR_NAMES = (("to_q_rot", "q_rot"), ("to_k_rot", "k_rot"))
+
+
+def offline_qk_rotation_flags(description: dict, prefix: str) -> tuple[bool, bool]:
+    """(q_exported, k_exported): whether ``prefix``'s Q/K rotations are FLOAT."""
+    q_names, k_names = _ROTATION_DESCRIPTOR_NAMES
+    return (
+        any(description.get(f"{prefix}.{name}") == "FLOAT" for name in q_names),
+        any(description.get(f"{prefix}.{name}") == "FLOAT" for name in k_names),
+    )
+
 
 def resolve_precision(description: dict, target: str, default: str) -> str:
     policy = description.get("timestep_policy", {}).get(target, {})

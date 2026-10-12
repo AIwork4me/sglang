@@ -195,7 +195,9 @@ def summarize_quant_description(
     for key, quant_type in quant_config.items():
         if quant_type.startswith("W4A4") and key not in state_dict:
             logger.warning(
-                "%s is marked %s but missing from the weight checkpoint", key, quant_type
+                "%s is marked %s but missing from the weight checkpoint",
+                key,
+                quant_type,
             )
         prefix = key.removesuffix(".self_attn.quant_type")
         if (

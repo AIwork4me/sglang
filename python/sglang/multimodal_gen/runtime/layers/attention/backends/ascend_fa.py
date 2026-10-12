@@ -12,6 +12,9 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.modelslim_mxfp_utils import (
+    offline_qk_rotation_flags,
+)
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
@@ -267,10 +270,10 @@ class AscendFAImpl(AttentionImpl):
         )
         description = getattr(quant_config, "quant_description", {})
         attention_prefix = prefix.removesuffix(".impl")
-        self.use_offline_qk_rotation = all(
-            description.get(f"{attention_prefix}.{name}") == "FLOAT"
-            for name in ("q_rot", "k_rot")
-        ) or (
+        q_rotation, k_rotation = offline_qk_rotation_flags(
+            description, attention_prefix
+        )
+        self.use_offline_qk_rotation = (q_rotation and k_rotation) or (
             not attention_prefix
             and getattr(quant_config, "use_offline_qk_rotation", False)
         )

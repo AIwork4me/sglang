@@ -53,6 +53,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp4LinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.modelslim_mxfp_utils import (
+    offline_qk_rotation_flags,
+)
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     NDRotaryEmbedding,
     _apply_rotary_emb,
@@ -528,22 +531,18 @@ class WanTransformerBlock(nn.Module):
             )
         else:
             quant_description = getattr(quant_config, "quant_description", {})
-            rotations = [
-                quant_description.get(f"{attention_prefix}.{name}") == "FLOAT"
-                for name in ("q_rot", "k_rot")
-            ]
-            if any(rotations) and not all(rotations):
+            q_rotation, k_rotation = offline_qk_rotation_flags(
+                quant_description, attention_prefix
+            )
+            if q_rotation != k_rotation:
                 raise ValueError(
                     f"{attention_prefix}: both Q/K rotation descriptors are required"
                 )
-            if self.attention_quant_scheme == "FP8" and not all(rotations):
+            if self.attention_quant_scheme == "FP8" and not q_rotation:
                 raise ValueError(
                     f"{attention_prefix}: ModelSlim FP8 attention requires exported Q/K rotations"
                 )
-            self.use_offline_qk_rotation = (
-                quant_description.get(f"{prefix}.attn1.q_rot") == "FLOAT"
-                and quant_description.get(f"{prefix}.attn1.k_rot") == "FLOAT"
-            )
+            self.use_offline_qk_rotation = q_rotation and k_rotation
             if self.use_offline_qk_rotation:
                 self.register_buffer(
                     "q_rot",
