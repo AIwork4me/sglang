@@ -693,6 +693,8 @@ class NPUSingleLevelMXFP4LinearMethod(_NPULinearMethodBase):
     fp4 ``npu_quant_matmul`` (same torch_npu-build caveat as the W4A8 path).
     """
 
+    activation_round_mode = "round"
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -786,7 +788,7 @@ class NPUSingleLevelMXFP4LinearMethod(_NPULinearMethodBase):
         qx, input_scale = torch.ops.npu.npu_dynamic_mx_quant(
             x_2d,
             dst_type=fp4_dtype,
-            round_mode="round",
+            round_mode=self.activation_round_mode,
             **getattr(layer, "mxfp4_quant_kwargs", {}),
         )
 
@@ -818,10 +820,12 @@ class NPUSingleLevelMXFP4OfflineLinearMethod(NPUSingleLevelMXFP4LinearMethod):
     The msmodelslim ``W4A4_MXFP4`` checkpoint stores weights as packed ``uint8``
     [out, in//2] (two FP4 values per byte) plus UE8M0 block scales (``uint8``
     [out, in/32]). The weight optionally uses NZ, is transposed, and the scale
-    reshaped to 3D; it then shares the online
-    :class:`NPUSingleLevelMXFP4LinearMethod` matmul (``apply``) exactly — only
-    the weight source differs (msmodelslim checkpoint vs online RTN).
+    reshaped to 3D. The base matmul uses MindIE's activation rounding for
+    this offline method.
     """
+
+    # MindIE leaves activation rounding at the operator's rint default.
+    activation_round_mode = "rint"
 
     def process_weights_after_loading(
         self, layer: torch.nn.Module, *, prepare_w4a8: bool = False
