@@ -315,22 +315,22 @@ def npu_format_cast(
     return torch.ops.npu.npu_format_cast(tensor, acl_format.value)
 
 
-def cast_packed_fp4_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
-    """Keep packed FP4 in ND unless MXFP4 NZ conversion is enabled.
-
-    The cast goes through the int8 view, never the fp4 unpack kwargs
-    (``customize_dtype=float8_e4m3fn, input_dtype=float4_e2m1fn_x2``): on
-    CANN >= 9.2 that cast tags the result ``FRACTAL_NZ_C0_32``, which the
-    quant matmuls reject — op-plugin's ``is_nz_format`` only allows
-    ``{FRACTAL_NZ, C0_2, C0_4, C0_16}`` and ``aclnnQuantMatmulWeightNz``
-    fails a C0_32 x2 with EZ0035 (torch_npu master hides this by remapping
-    C0_32→C0_16 for 4-bit casts; released builds don't). Plain NZ over the
-    byte carrier is the real contract: the aclnn unpacks the nibbles itself
-    (k = bytes * 2), the same recipe ``npu_dual_level_quant_matmul`` weights
-    already use.
-    """
+def cast_packed_fp4_weight_to_nz(
+    weight: torch.Tensor, *, w4a8: bool = False
+) -> torch.Tensor:
+    """Optionally prepare NZ with K0=64 for W4A4 or K0=32 for W4A8."""
     if not envs.SGLANG_NPU_ENABLE_MXFP4_NZ.get():
         return weight
+    if w4a8:
+        import torch_npu
+
+        # FP8-target packing uses 16 bytes per block of 32 logical FP4 values.
+        return npu_format_cast(
+            weight.view(torch.int8),
+            NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch_npu.float4_e2m1fn_x2,
+        )
     return npu_format_cast(
         weight.view(torch.int8),
         NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,

@@ -498,11 +498,8 @@ class NPUMXFP4W4A8LinearMethod(_NPULinearMethodBase):
             weight_fp, dst_type=fp4_dtype, round_mode="round"
         )
 
-        # weight: packed FP4 -> optional FRACTAL_NZ (int8 view; see
-        # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs)
-        # -> transpose [in//2, out], mirroring the offline path (no
-        # .contiguous() on the NZ view).
-        qw_nz = cast_packed_fp4_weight_to_nz(qw)
+        # W4A8 requires K0=32 logical FP4 values in NZ storage.
+        qw_nz = cast_packed_fp4_weight_to_nz(qw, w4a8=True)
         layer.weight = Parameter(qw_nz.transpose(-1, -2), requires_grad=False)
 
         # weight_scale -> [in//64, out, 2] to match npu_quant_matmul.
@@ -585,7 +582,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     scales (``uint8`` shape ``[out, in//group_size]``):
 
       process_weights_after_loading:
-        weight (uint8 packed FP4 [out, in//2]) → optional int8-view FRACTAL_NZ cast
+        weight (uint8 packed FP4 [out, in//2]) → optional FP8-target NZ cast
             (cast_packed_fp4_weight_to_nz) → transpose [in//2, out]
         weight_scale [out, in/32] → reshape [out, in/64, 2] → transpose → [in/64, out, 2]
 
@@ -598,13 +595,8 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     returns a 3D ``[tokens, in//64, 2]`` block scale so the matmul needs no extra
     scale-layout normalization.
 
-    ⚠️ REQUIRES a recent torch_npu build for the FP4 ``npu_quant_matmul``. On the
-    A5 this device forces ``allow_internal_format=False`` (the int8-view NZ cast
-    still tags the weight plain ``FRACTAL_NZ``). Older torch_npu (e.g.
-    ``2.10.0.dev20260320``) had a broken FP4 matmul that rejected the NZ weight in
-    *prefill* with ``x2 should be in ... nz format, but it is 2``;
-    ``2.10.0.post1.dev20260624`` (and later) runs the FRACTAL_NZ path correctly.
-    Verify the selected ND/NZ path with the installed torch_npu and CANN build.
+    W4A8 NZ uses K0=32 logical FP4 values; W4A4 NZ uses K0=64.
+    Mixed-precision layers cache the W4A8 layout in ``weight_w4a8``.
 
     ⚠️ A ``atb::OperationSetup`` *segfault during decode* (not prefill) is a
     DIFFERENT, unrelated issue: it is the eager-decode ``ascend`` attention
@@ -622,12 +614,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Optionally cast the packed-FP4 weight to NZ (int8 view; see
-        # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs) then
-        # transpose to [in//2, out]. All NPU ops go through torch.ops.npu.*
-        # (no torch_npu). A recent torch_npu build is still required (see class
-        # docstring): older builds reject the NZ weight ("x2 ... it is 2").
-        layer.weight.data = cast_packed_fp4_weight_to_nz(layer.weight.data)
+        layer.weight.data = cast_packed_fp4_weight_to_nz(layer.weight.data, w4a8=True)
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         # weight_scale: [out, in/32] uint8 -> [in/64, out, 2].
         n, k = layer.weight_scale.data.shape
@@ -667,7 +654,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
         # W4(weight)A8(activation) matmul.
         output = torch.ops.npu.npu_quant_matmul(
             quantized_x,
-            layer.weight,
+            getattr(layer, "weight_w4a8", layer.weight),
             layer.weight_scale,
             scale_dtype=e8m0_dtype,
             pertoken_scale=dynamic_scale,
@@ -836,14 +823,18 @@ class NPUSingleLevelMXFP4OfflineLinearMethod(NPUSingleLevelMXFP4LinearMethod):
     the weight source differs (msmodelslim checkpoint vs online RTN).
     """
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(
+        self, layer: torch.nn.Module, *, prepare_w4a8: bool = False
+    ) -> None:
         weight = layer.weight.data
         if not weight.is_npu:
             weight = weight.to(f"npu:{torch.npu.current_device()}")
-        # The checkpoint is already packed two-FP4-per-byte [out, in//2].
-        # Optionally cast to NZ (int8 view; same layout as the W4A8 offline
-        # kernel — see cast_packed_fp4_weight_to_nz) and transpose to
-        # [in//2, out] for npu_quant_matmul.
+        if prepare_w4a8:
+            # ND shares storage; NZ needs separate K0=32 and K0=64 layouts.
+            weight_w4a8 = cast_packed_fp4_weight_to_nz(weight, w4a8=True)
+            layer.register_buffer(
+                "weight_w4a8", weight_w4a8.transpose(-1, -2), persistent=False
+            )
         weight = cast_packed_fp4_weight_to_nz(weight)
         layer.weight = Parameter(weight.transpose(-1, -2), requires_grad=False)
 

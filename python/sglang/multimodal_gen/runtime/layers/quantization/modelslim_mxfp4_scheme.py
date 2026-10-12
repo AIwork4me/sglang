@@ -154,8 +154,9 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if not self.is_dual_scale:
-            # W4A4 and W4A8 share packed weights and the same scale layout.
-            self.single_level_kernel.process_weights_after_loading(layer)
+            self.single_level_kernel.process_weights_after_loading(
+                layer, prepare_w4a8=True
+            )
             layer.mxfp4_quant_kwargs = mxfp4_quant_kwargs(self.quant_config)
             if self.has_mul_scale:
                 mul_scale = layer.mul_scale.data
