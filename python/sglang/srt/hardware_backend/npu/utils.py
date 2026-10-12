@@ -266,9 +266,8 @@ def npu_format_cast(
         customize_dtype / input_dtype: carrier-dtype kwargs (e.g.
             ``customize_dtype=torch.int8``, ``input_dtype=torch.int8`` for the
             packed-FP4 view). When either is set the kwargs are forwarded to the
-            op and the ``_is_nz_aligned`` ND fallback is skipped: quant matmuls
-            strictly require FRACTAL_NZ, so a silent ND fallback would corrupt
-            results.
+            op and the ``_is_nz_aligned`` ND fallback is skipped so an explicit
+            carrier-dtype conversion does not silently keep ND storage.
 
     Returns:
         torch.Tensor: The tensor cast to the specified NPU ACL format.
@@ -292,9 +291,7 @@ def npu_format_cast(
     if tensor.device.type == "meta":
         return tensor
 
-    # Carrier-dtype-explicit casts (e.g. the packed-FP4 int8 view) skip the
-    # _is_nz_aligned ND fallback — the quant matmuls strictly require NZ, so a
-    # silent ND fallback would corrupt results.
+    # Explicit carrier-dtype casts must not silently skip the requested layout.
     if customize_dtype is not None or input_dtype is not None:
         return torch.ops.npu.npu_format_cast(
             tensor,
@@ -319,7 +316,7 @@ def npu_format_cast(
 
 
 def cast_packed_fp4_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
-    """Lay a packed-FP4 weight (``[out, in//2]`` uint8/int8) out as FRACTAL_NZ.
+    """Keep packed FP4 in ND unless MXFP4 NZ conversion is enabled.
 
     The cast goes through the int8 view, never the fp4 unpack kwargs
     (``customize_dtype=float8_e4m3fn, input_dtype=float4_e2m1fn_x2``): on
@@ -332,6 +329,8 @@ def cast_packed_fp4_weight_to_nz(weight: torch.Tensor) -> torch.Tensor:
     (k = bytes * 2), the same recipe ``npu_dual_level_quant_matmul`` weights
     already use.
     """
+    if not envs.SGLANG_NPU_ENABLE_MXFP4_NZ.get():
+        return weight
     return npu_format_cast(
         weight.view(torch.int8),
         NPUACLFormat.ACL_FORMAT_FRACTAL_NZ,

@@ -498,7 +498,7 @@ class NPUMXFP4W4A8LinearMethod(_NPULinearMethodBase):
             weight_fp, dst_type=fp4_dtype, round_mode="round"
         )
 
-        # weight: packed FP4 -> FRACTAL_NZ (int8 view; see
+        # weight: packed FP4 -> optional FRACTAL_NZ (int8 view; see
         # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs)
         # -> transpose [in//2, out], mirroring the offline path (no
         # .contiguous() on the NZ view).
@@ -585,7 +585,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     scales (``uint8`` shape ``[out, in//group_size]``):
 
       process_weights_after_loading:
-        weight (uint8 packed FP4 [out, in//2]) → int8-view FRACTAL_NZ cast
+        weight (uint8 packed FP4 [out, in//2]) → optional int8-view FRACTAL_NZ cast
             (cast_packed_fp4_weight_to_nz) → transpose [in//2, out]
         weight_scale [out, in/32] → reshape [out, in/64, 2] → transpose → [in/64, out, 2]
 
@@ -593,7 +593,8 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
         BF16/FP16 activation → npu_dynamic_mx_quant(dst=float8_e4m3fn)  (A8, MXFP8)
         → npu_quant_matmul(x2_dtype=float4_e2m1fn_x2, group_sizes=[0, 0, block])
 
-    The weight is cast to FRACTAL_NZ then transposed; ``npu_dynamic_mx_quant`` already
+    The weight stays ND by default, or uses NZ with ``SGLANG_NPU_ENABLE_MXFP4_NZ=1``.
+    It is then transposed; ``npu_dynamic_mx_quant`` already
     returns a 3D ``[tokens, in//64, 2]`` block scale so the matmul needs no extra
     scale-layout normalization.
 
@@ -603,8 +604,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     ``2.10.0.dev20260320``) had a broken FP4 matmul that rejected the NZ weight in
     *prefill* with ``x2 should be in ... nz format, but it is 2``;
     ``2.10.0.post1.dev20260624`` (and later) runs the FRACTAL_NZ path correctly.
-    If you hit ``it is 2``, update torch_npu — do NOT "fix" it by
-    switching the weight to ND.
+    Verify the selected ND/NZ path with the installed torch_npu and CANN build.
 
     ⚠️ A ``atb::OperationSetup`` *segfault during decode* (not prefill) is a
     DIFFERENT, unrelated issue: it is the eager-decode ``ascend`` attention
@@ -622,7 +622,7 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Cast the packed-FP4 weight to FRACTAL_NZ (int8 view; see
+        # Optionally cast the packed-FP4 weight to NZ (int8 view; see
         # cast_packed_fp4_weight_to_nz for why not the fp4 unpack kwargs) then
         # transpose to [in//2, out]. All NPU ops go through torch.ops.npu.*
         # (no torch_npu). A recent torch_npu build is still required (see class
@@ -760,11 +760,7 @@ class NPUSingleLevelMXFP4LinearMethod(_NPULinearMethodBase):
         qw, w_scale = torch.ops.npu.npu_dynamic_mx_quant(
             weight_fp, dst_type=fp4_dtype, round_mode="round"
         )
-        # Lay the packed FP4 weight out as FRACTAL_NZ (int8 view; see
-        # cast_packed_fp4_weight_to_nz), mirroring the W4A8 path, then
-        # transpose to [in//2, out] for npu_quant_matmul. The NZ layout keeps
-        # the fp4 GEMM on the Cube-friendly data path on A5 (same torch_npu
-        # build caveat as the W4A8 path).
+        # Share the optional NZ layout with W4A8 before transposing.
         qw_nz = cast_packed_fp4_weight_to_nz(qw)
         layer.weight = Parameter(qw_nz.transpose(-1, -2), requires_grad=False)
 
@@ -831,7 +827,7 @@ class NPUSingleLevelMXFP4OfflineLinearMethod(NPUSingleLevelMXFP4LinearMethod):
     Kernel for the offline ``ModelSlimMXFP4Scheme`` (delegated as ``self.kernel``).
     The msmodelslim ``W4A4_MXFP4`` checkpoint stores weights as packed ``uint8``
     [out, in//2] (two FP4 values per byte) plus UE8M0 block scales (``uint8``
-    [out, in/32]). The weight is cast to FRACTAL_NZ, transposed, and the scale
+    [out, in/32]). The weight optionally uses NZ, is transposed, and the scale
     reshaped to 3D; it then shares the online
     :class:`NPUSingleLevelMXFP4LinearMethod` matmul (``apply``) exactly — only
     the weight source differs (msmodelslim checkpoint vs online RTN).
@@ -842,7 +838,7 @@ class NPUSingleLevelMXFP4OfflineLinearMethod(NPUSingleLevelMXFP4LinearMethod):
         if not weight.is_npu:
             weight = weight.to(f"npu:{torch.npu.current_device()}")
         # The checkpoint is already packed two-FP4-per-byte [out, in//2].
-        # Cast to FRACTAL_NZ (int8 view; same layout as the W4A8 offline
+        # Optionally cast to NZ (int8 view; same layout as the W4A8 offline
         # kernel — see cast_packed_fp4_weight_to_nz) and transpose to
         # [in//2, out] for npu_quant_matmul.
         weight = cast_packed_fp4_weight_to_nz(weight)

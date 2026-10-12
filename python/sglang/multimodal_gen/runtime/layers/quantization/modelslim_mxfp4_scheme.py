@@ -33,6 +33,7 @@ MXFP4_BLOCK_SIZE = 32
 # L1 block covers 16 * 32 = 512 elements.
 MXFP4_DUAL_LEVEL_RATIO = 16
 MXFP4_PACK_FACTOR = 2
+MXFP4_DEFAULT_TIMESTEP_POLICY = dict.fromkeys(("0", "1", "38", "39"), "W4A8")
 
 
 class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
@@ -153,22 +154,8 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if not self.is_dual_scale:
-            policy = self.quant_config.get("timestep_policy", {}).get("w4a4_linear", {})
-            uses_w4a8 = "W4A8" in policy.values()
-            # resolve_precision falls back to W4A4 for steps the policy does not
-            # cover, so a policy without a W4A8 "default" still executes W4A4.
-            uses_w4a4 = "W4A4" in policy.values() or "default" not in policy
-            if uses_w4a8 and uses_w4a4:
-                raise NotImplementedError(
-                    f"{self.prefix}: mixed W4A4/W4A8 linear timestep policies are "
-                    "unsupported for single-level MXFP4. Both load paths now lay "
-                    "the weight out as FRACTAL_NZ, but the two applies quantize "
-                    "activations differently (FP8 vs FP4) and the per-timestep "
-                    "switch has not been verified on hardware; use a uniform "
-                    "policy."
-                )
-            kernel = self.w4a8_kernel if uses_w4a8 else self.single_level_kernel
-            kernel.process_weights_after_loading(layer)
+            # W4A4 and W4A8 share packed weights and the same scale layout.
+            self.single_level_kernel.process_weights_after_loading(layer)
             layer.mxfp4_quant_kwargs = mxfp4_quant_kwargs(self.quant_config)
             if self.has_mul_scale:
                 mul_scale = layer.mul_scale.data
@@ -184,10 +171,11 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
         weight = layer.weight.data
         if not weight.is_npu:
             weight = weight.to(f"npu:{torch.npu.current_device()}")
-        # npu_dual_level_quant_matmul requires x2 in FRACTAL_NZ format (format 29).
-        weight = torch_npu.npu_format_cast(
-            weight.view(torch.int8), 29, customize_dtype=torch.int8
+        from sglang.srt.hardware_backend.npu.utils import (
+            cast_packed_fp4_weight_to_nz,
         )
+
+        weight = cast_packed_fp4_weight_to_nz(weight)
         layer.weight = torch.nn.Parameter(weight, requires_grad=False)
 
         # Reshape weight_scale: [out, in/32] -> [out, in/64, 2]
@@ -228,7 +216,14 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        precision = resolve_precision(self.quant_config, "w4a4_linear", "W4A4")
+        precision = resolve_precision(
+            self.quant_config,
+            "w4a4_linear",
+            "W4A4",
+            default_policy=(
+                None if self.is_dual_scale else MXFP4_DEFAULT_TIMESTEP_POLICY
+            ),
+        )
         if not self.is_dual_scale:
             if getattr(layer, "use_mul_scale", False):
                 x = x * layer.mul_scale.to(x.dtype)
@@ -251,15 +246,14 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
         input_shape = x.shape
         x_2d = x.reshape(-1, x.shape[-1])
 
-        # Apply smooth quant scale before activation quantization.
-        # The offline-quantized weights were calibrated under x * mul_scale,
-        # so we MUST apply it here for scale alignment.
-        if getattr(layer, "use_mul_scale", False):
-            x_2d = x_2d * layer.mul_scale.to(x_2d.dtype)
-
-        # Dual-level MXFP4 activation quantization
+        # Let dual-level quantization apply smoothing, as in MindIE-SD.
+        smooth_scale = (
+            layer.mul_scale.to(x_2d.dtype)
+            if getattr(layer, "use_mul_scale", False)
+            else None
+        )
         x1, l0_scale, l1_scale = torch_npu.npu_dynamic_dual_level_mx_quant(
-            x_2d, smooth_scale=None
+            x_2d, smooth_scale=smooth_scale
         )
 
         # Dual-level MXFP4 matmul

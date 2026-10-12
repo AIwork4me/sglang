@@ -193,6 +193,8 @@ def summarize_quant_description(
     logger.info("Blocks with exported Q/K rotations: %d", rotation_blocks)
 
     for key, quant_type in quant_config.items():
+        if not isinstance(quant_type, str):
+            continue
         if quant_type.startswith("W4A4") and key not in state_dict:
             logger.warning(
                 "%s is marked %s but missing from the weight checkpoint",

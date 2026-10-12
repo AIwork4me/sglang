@@ -17,16 +17,19 @@ def offline_qk_rotation_flags(description: dict, prefix: str) -> tuple[bool, boo
     )
 
 
-def resolve_precision(description: dict, target: str, default: str) -> str:
+def resolve_precision(
+    description: dict, target: str, default: str, default_policy: dict | None = None
+) -> str:
     policy = description.get("timestep_policy", {}).get(target, {})
-    if not policy:
+    if not policy and not default_policy:
         return default
     from sglang.multimodal_gen.runtime.managers.forward_context import (
         get_forward_context,
     )
 
     step = get_forward_context().current_timestep
-    precision = policy.get(str(step), policy.get("default", default))
+    fallback = (default_policy or {}).get(str(step), default)
+    precision = policy.get(str(step), policy.get("default", fallback))
     allowed = {"fa": ("FLOAT", "FP8", "MXFP4"), "w4a4_linear": ("W4A4", "W4A8")}
     if precision not in allowed[target]:
         raise ValueError(f"Unsupported ModelSlim {target} precision: {precision}")
