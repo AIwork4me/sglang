@@ -658,8 +658,11 @@ class NPUMXFP4W4A8OfflineLinearMethod(_NPULinearMethodBase):
             x_2d, dst_type=torch.float8_e4m3fn
         )
 
-        if bias is not None and bias.dtype != torch.float32:
-            bias = bias.to(torch.float32)
+        if bias is not None:
+            # W4A8 QuantMatmulV5 expects a BF16 bias with a batch dimension.
+            bias = bias.to(torch.bfloat16)
+            if bias.ndim == 1:
+                bias = bias.unsqueeze(0)
 
         # W4(weight)A8(activation) matmul.
         output = torch.ops.npu.npu_quant_matmul(
