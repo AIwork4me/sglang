@@ -5,6 +5,7 @@ import inspect
 
 import pytest
 
+from sglang.srt.lora.utils import capturing_lora_graph
 from sglang.srt.model_executor.runner_utils import capture_lora_variant, capture_mode
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -18,16 +19,20 @@ def test_capture_lora_variant_restores_the_previous_label(monkeypatch):
         assert capture_mode.get_capture_lora_variant() == "lora"
         with capture_lora_variant("nolora"):
             assert capture_mode.get_capture_lora_variant() == "nolora"
+            assert not capturing_lora_graph()
         assert capture_mode.get_capture_lora_variant() == "lora"
     assert capture_mode.get_capture_lora_variant() is None
     with pytest.raises(RuntimeError):
         with capture_lora_variant("nolora"):
             raise RuntimeError("capture failed")
     assert capture_mode.get_capture_lora_variant() is None
+    # A later single-graph capture (prefill, a draft runner) keeps its LoRA work.
+    assert capturing_lora_graph()
 
 
 BACKENDS = [
     ("sglang.srt.lora.backend.triton_backend", "TritonLoRABackend"),
+    ("sglang.srt.lora.backend.triton_v2_backend", "TritonV2LoRABackend"),
     ("sglang.srt.lora.backend.chunked_backend", "ChunkedSgmvLoRABackend"),
     ("sglang.srt.lora.backend.torch_backend", "TorchNativeLoRABackend"),
     ("sglang.srt.lora.backend.ascend_backend", "AscendLoRABackend"),
