@@ -248,7 +248,9 @@ CACHE_DIT_REQUEST_SCM_KEYS = frozenset(
     }
 )
 CACHE_DIT_REQUEST_PARAM_KEYS = (
-    CACHE_DIT_REQUEST_KNOB_KEYS | CACHE_DIT_REQUEST_SCM_KEYS | {"secondary"}
+    CACHE_DIT_REQUEST_KNOB_KEYS
+    | CACHE_DIT_REQUEST_SCM_KEYS
+    | {"secondary", "layer_groups"}
 )
 
 
@@ -272,13 +274,18 @@ def resolve_cache_dit_request_overrides(raw: dict | None) -> dict:
                 "cache_dit_params['secondary'] must be a dict, got "
                 f"{type(secondary).__name__}."
             )
-        unknown = set(secondary) - CACHE_DIT_REQUEST_KNOB_KEYS
+        unknown = set(secondary) - (CACHE_DIT_REQUEST_KNOB_KEYS | {"layer_groups"})
         if unknown:
             raise ValueError(
                 f"Unknown cache_dit_params['secondary'] keys: {sorted(unknown)}. "
                 f"Valid keys: {sorted(CACHE_DIT_REQUEST_KNOB_KEYS)}."
             )
         overrides["secondary"] = dict(secondary)
+    from sglang.multimodal_gen.runtime.cache.wan_f4 import validate_layer_groups
+
+    for config in (overrides, overrides.get("secondary") or {}):
+        if "layer_groups" in config:
+            config["layer_groups"] = validate_layer_groups(config["layer_groups"])
     return overrides
 
 

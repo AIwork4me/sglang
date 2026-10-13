@@ -361,6 +361,7 @@ class SamplingParams:
     # Per-request knob overrides on top of the SGLANG_CACHE_DIT_* defaults.
     # Valid keys: CACHE_DIT_REQUEST_PARAM_KEYS in cache_dit_integration.py.
     cache_dit_params: dict[str, Any] | None = None
+    modelslim_precision: dict[str, str] | None = None
 
     # Per-request DiT attention backend ("fa", "torch_sdpa", "sage_attn",
     # "sage_attn_3"; sage is lossy). Incompatible server settings reject the
@@ -640,6 +641,12 @@ class SamplingParams:
 
         self.quality = normalize_quality(self.quality)
 
+        from sglang.multimodal_gen.runtime.layers.quantization.modelslim_mxfp_utils import (
+            validate_modelslim_precision,
+        )
+
+        validate_modelslim_precision(self.modelslim_precision)
+
         resolve_skip_softmax_params(self.skip_softmax_params)
 
         # These are always required to be sane regardless of pipeline.
@@ -772,9 +779,18 @@ class SamplingParams:
         RLRolloutArgs.validate_sampling_params(self)
 
     def _validate_with_pipeline_config(self, pipeline_config):
-        """
-        check if the sampling params is compatible and valid with server_args
-        """
+        """Check request compatibility with the pipeline configuration."""
+        if any(
+            value != "checkpoint" for value in (self.modelslim_precision or {}).values()
+        ):
+            from sglang.multimodal_gen.configs.pipeline_configs.wan import (
+                Wan2_2_T2V_A14B_Config,
+            )
+
+            if not isinstance(pipeline_config, Wan2_2_T2V_A14B_Config):
+                raise ValueError(
+                    "modelslim_precision diagnostics require Wan2.2 T2V A14B ModelSlim F4"
+                )
         task_type = self.resolve_task_type(pipeline_config)
         if task_type.is_action_gen():
             return
@@ -1104,6 +1120,11 @@ class SamplingParams:
         add_argument(
             "--cache-dit-params",
             type=json.loads,
+        )
+        add_argument(
+            "--modelslim-precision",
+            type=json.loads,
+            help='Wan F4 diagnostics, e.g. {"linear":"W4A8","attention":"FLOAT"}; requires caching off.',
         )
         add_argument(
             "--cfg-gate-step",

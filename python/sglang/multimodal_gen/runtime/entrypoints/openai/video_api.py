@@ -112,6 +112,7 @@ _MULTIPART_EXTRA_FORM_FIELDS = (
     "cache_dit_params",
     "cfg_gate_step",
     "enable_cache_dit",
+    "modelslim_precision",
     "quality",
     "skip_softmax_params",
 )
@@ -273,6 +274,7 @@ def _build_video_sampling_params(request_id: str, request: VideoGenerationsReque
         "use_diffusion_decoder": request_extra_value(request, "use_diffusion_decoder"),
         "enable_cache_dit": request_extra_value(request, "enable_cache_dit"),
         "cache_dit_params": request_extra_value(request, "cache_dit_params"),
+        "modelslim_precision": request_extra_value(request, "modelslim_precision"),
         "cfg_gate_step": request_extra_value(request, "cfg_gate_step"),
         "attention_backend_override": request_extra_value(
             request, "attention_backend_override"

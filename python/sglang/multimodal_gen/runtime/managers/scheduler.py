@@ -508,12 +508,25 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         exclude_num_outputs = (
             self.server_args.pipeline_config.supports_sequential_dit_inference()
         )
-        return [
+        items = [
             (f.name, self._freeze_signature_value(getattr(sp, f.name, None)))
             for f in sp_fields
             if not f.metadata.get("batch_sig_exclude", False)
             and not (exclude_num_outputs and f.name == "num_outputs_per_prompt")
         ]
+        from sglang.multimodal_gen.configs.pipeline_configs.wan import (
+            Wan2_2_T2V_A14B_Config,
+        )
+
+        if isinstance(self.server_args.pipeline_config, Wan2_2_T2V_A14B_Config):
+            # An omitted quality can inherit legacy caching; explicit lossless cannot.
+            items.append(
+                (
+                    "wan_quality_explicit",
+                    "quality" in getattr(sp, "_explicit_fields", ()),
+                )
+            )
+        return items
 
     def _diffusers_kwargs_signature_value(self, req: Req) -> Any:
         return self._freeze_signature_value((req.extra or {}).get("diffusers_kwargs"))

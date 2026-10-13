@@ -19,6 +19,20 @@ from __future__ import annotations
 import torch
 from diffusers.utils.torch_utils import randn_tensor
 
+from sglang.multimodal_gen import envs
+from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_T2V_A14B_Config
+from sglang.multimodal_gen.runtime.cache.cache_dit_integration import (
+    CACHE_DIT_REQUEST_KNOB_KEYS,
+    CacheDitConfig,
+    cache_dit_overrides_key,
+    get_scm_mask,
+    resolve_cache_dit_request_overrides,
+)
+from sglang.multimodal_gen.runtime.cache.wan_f4 import (
+    WanF4GroupedCache,
+    default_layer_groups,
+    wan_f4_cache_mode,
+)
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.denoising import (
@@ -56,6 +70,214 @@ class WanProgressiveDenoisingStage(ProgressiveDenoisingStage):
             spectrum_A=WAN_SPECTRUM_A,
             spectrum_beta=WAN_SPECTRUM_BETA,
         )
+        self._wan_f4_grouped_cache = None
+
+    def _is_wan_f4(self) -> bool:
+        if not isinstance(self.server_args.pipeline_config, Wan2_2_T2V_A14B_Config):
+            return False
+        return any(
+            isinstance(value, str) and value.startswith("W4A4_MXFP4")
+            for transformer in (self.transformer, self.transformer_2)
+            if transformer is not None
+            for block in transformer.blocks
+            for value in getattr(block, "attention_quant_description", {}).values()
+        )
+
+    def _cache_dit_requested_for_batch(self, batch: Req) -> bool:
+        if self._is_wan_f4():
+            return (
+                wan_f4_cache_mode(batch.sampling_params, envs.SGLANG_CACHE_DIT_ENABLED)
+                is not None
+            )
+        return super()._cache_dit_requested_for_batch(batch)
+
+    def _unmount_cache_dit(self) -> None:
+        grouped = getattr(self, "_wan_f4_grouped_cache", None)
+        if grouped is None:
+            super()._unmount_cache_dit()
+            return
+        grouped.disable()
+        self._wan_f4_grouped_cache = None
+        self._cache_dit_enabled = False
+        self._cache_dit_active_key = None
+
+    def _maybe_enable_cache_dit(self, num_inference_steps, batch: Req) -> None:
+        params = batch.sampling_params
+        diagnostics = {
+            key: value
+            for key, value in (params.modelslim_precision or {}).items()
+            if value != "checkpoint"
+        }
+        scoped = self._is_wan_f4()
+        if diagnostics and not scoped:
+            raise ValueError(
+                "modelslim_precision diagnostics require Wan2.2 T2V A14B ModelSlim F4"
+            )
+        if not scoped:
+            return super()._maybe_enable_cache_dit(num_inference_steps, batch)
+        mode = wan_f4_cache_mode(params, envs.SGLANG_CACHE_DIT_ENABLED)
+        if diagnostics:
+            if mode is not None or params.enable_teacache or params.enable_spectrum:
+                raise ValueError(
+                    "modelslim_precision diagnostics require all feature caching disabled"
+                )
+            if diagnostics.get("linear") == "W4A8" and any(
+                getattr(getattr(module, "scheme", None), "is_dual_scale", False)
+                for transformer in (self.transformer, self.transformer_2)
+                if transformer is not None
+                for module in transformer.modules()
+            ):
+                raise ValueError(
+                    "W4A8 diagnostics do not support dual-scale MXFP4 linears"
+                )
+        if mode != "grouped":
+            if self._wan_f4_grouped_cache is not None:
+                self._unmount_cache_dit()
+            return super()._maybe_enable_cache_dit(num_inference_steps, batch)
+        if params.enable_teacache or params.enable_spectrum:
+            raise ValueError(
+                "Wan F4 grouped Cache-DiT cannot be combined with TeaCache or Spectrum"
+            )
+        if (
+            self.server_args.enable_breakable_cuda_graph
+            or self.server_args.enable_torch_compile
+        ):
+            raise ValueError(
+                "Wan F4 grouped Cache-DiT currently requires eager execution"
+            )
+        if getattr(batch, "progressive_mode", "fullres") != "fullres":
+            raise ValueError(
+                "Wan F4 grouped Cache-DiT requires full-resolution denoising"
+            )
+        if batch.is_warmup:
+            if self._cache_dit_enabled:
+                self._unmount_cache_dit()
+            return
+        overrides = resolve_cache_dit_request_overrides(params.cache_dit_params)
+        self._cache_dit_request_overrides = overrides
+        primary_steps, secondary_steps = self._cache_dit_step_counts(
+            num_inference_steps
+        )
+        steps = (
+            [primary_steps]
+            if self.transformer_2 is None
+            else [primary_steps, secondary_steps]
+        )
+        transformers = (
+            [self.transformer]
+            if self.transformer_2 is None
+            else [self.transformer, self.transformer_2]
+        )
+        high = (
+            "quality" in getattr(params, "_explicit_fields", ())
+            and params.quality == "high"
+        )
+        if high:
+            configs = []
+            for expert, count in enumerate(steps):
+                knobs = {
+                    key: value
+                    for key, value in overrides.items()
+                    if key in CACHE_DIT_REQUEST_KNOB_KEYS
+                }
+                if expert:
+                    knobs.update(
+                        {
+                            key: value
+                            for key, value in (overrides.get("secondary") or {}).items()
+                            if key in CACHE_DIT_REQUEST_KNOB_KEYS
+                        }
+                    )
+                configs.append(
+                    CacheDitConfig(
+                        enabled=True,
+                        num_inference_steps=count,
+                        **dict(
+                            {
+                                "Fn_compute_blocks": 1,
+                                "Bn_compute_blocks": 1,
+                                "max_warmup_steps": 6,
+                                "residual_diff_threshold": 0.05 if expert else 0.08,
+                                "max_continuous_cached_steps": 1,
+                                "enable_taylorseer": False,
+                                "enable_dmd": False,
+                            },
+                            **knobs,
+                        ),
+                        steps_computation_mask=get_scm_mask(
+                            preset=overrides.get("scm_preset", "none"),
+                            num_inference_steps=count,
+                            compute_bins=overrides.get("scm_compute_bins"),
+                            cache_bins=overrides.get("scm_cache_bins"),
+                        ),
+                        steps_computation_policy=overrides.get("scm_policy", "dynamic"),
+                    )
+                )
+        else:
+            _, policy, primary_mask, secondary_mask = self._cache_dit_scm_masks(
+                primary_steps, secondary_steps
+            )
+            configs = [
+                self._build_cache_dit_config(
+                    count, mask, policy, secondary=bool(expert)
+                )
+                for expert, (count, mask) in enumerate(
+                    zip(steps, [primary_mask, secondary_mask])
+                )
+            ]
+        groups = []
+        for expert, transformer in enumerate(transformers):
+            raw = (overrides.get("secondary") or {}) if expert else overrides
+            groups.append(
+                raw.get(
+                    "layer_groups",
+                    overrides.get(
+                        "layer_groups", default_layer_groups(len(transformer.blocks))
+                    ),
+                )
+            )
+        has_separate_cfg = (
+            batch.do_classifier_free_guidance
+            and not self.server_args.enable_cfg_parallel
+        )
+        key = (
+            "wan_f4_grouped",
+            high,
+            tuple(steps),
+            cache_dit_overrides_key(overrides),
+            has_separate_cfg,
+        )
+        if self._cache_dit_enabled and key != self._cache_dit_active_key:
+            self._unmount_cache_dit()
+        if self._wan_f4_grouped_cache is not None:
+            self._wan_f4_grouped_cache.refresh()
+            return
+        from sglang.multimodal_gen.runtime.distributed import (
+            get_sp_group,
+            get_tp_group,
+            get_world_size,
+        )
+
+        sp_group = tp_group = None
+        if get_world_size() > 1:
+            sp, tp = get_sp_group(), get_tp_group()
+            sp_group = sp.device_group if sp.world_size > 1 else None
+            tp_group = tp.device_group if tp.world_size > 1 else None
+        self._wan_f4_grouped_cache = WanF4GroupedCache(
+            transformers,
+            configs,
+            groups,
+            has_separate_cfg=has_separate_cfg,
+            sp_group=sp_group,
+            tp_group=tp_group,
+        )
+        self._cache_dit_enabled = True
+        self._cache_dit_active_key = key
+        logger.info(
+            "Wan F4 quality=%s precision=%s cache=grouped",
+            params.quality,
+            params.modelslim_precision or "checkpoint",
+        )
 
     # ------------------------------------------------------------------
     # Latent scale factor  (WanVAEArchConfig uses spatial_compression_ratio)
@@ -87,7 +309,11 @@ class WanProgressiveDenoisingStage(ProgressiveDenoisingStage):
         """
         mode = getattr(batch, "progressive_mode", "fullres") or "fullres"
         if not is_progressive_resolution_mode(mode):
-            return super().forward(batch, server_args)
+            try:
+                return super().forward(batch, server_args)
+            finally:
+                if self._wan_f4_grouped_cache is not None:
+                    self._wan_f4_grouped_cache.log_stats()
 
         levels = int(getattr(batch, "progressive_levels", 1))
         arch = server_args.pipeline_config.vae_config.arch_config

@@ -1076,6 +1076,10 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self._cache_dit_request_overrides = resolve_cache_dit_request_overrides(
             batch.sampling_params.cache_dit_params
         )
+        if "layer_groups" in self._cache_dit_request_overrides or "layer_groups" in (
+            self._cache_dit_request_overrides.get("secondary") or {}
+        ):
+            raise ValueError("layer_groups require the Wan2.2 T2V A14B ModelSlim F4 grouped cache")
         has_separate_cfg = (
             requested
             and batch.do_classifier_free_guidance

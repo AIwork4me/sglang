@@ -17,17 +17,46 @@ def offline_qk_rotation_flags(description: dict, prefix: str) -> tuple[bool, boo
     )
 
 
+def validate_modelslim_precision(raw: dict | None) -> dict:
+    if raw is None:
+        return {}
+    allowed = {"linear": ("checkpoint", "W4A8"), "attention": ("checkpoint", "FLOAT")}
+    if not isinstance(raw, dict) or set(raw) - allowed.keys():
+        raise ValueError("modelslim_precision accepts only 'linear' and 'attention'")
+    for key, value in raw.items():
+        if value not in allowed[key]:
+            raise ValueError(f"Unsupported modelslim_precision.{key}: {value}")
+    return dict(raw)
+
+
+def default_mxfp4_policy(num_steps: int) -> dict[str, str]:
+    return {
+        str(step): "W4A8"
+        for step in range(num_steps)
+        if step < 2 or step >= num_steps - 2
+    }
+
+
 def resolve_precision(
     description: dict, target: str, default: str, default_policy: dict | None = None
 ) -> str:
+    from sglang.multimodal_gen.runtime.managers.forward_context import (
+        get_forward_context_or_none,
+    )
+
+    context = get_forward_context_or_none()
+    batch = context.forward_batch if context is not None else None
+    params = getattr(batch, "sampling_params", None)
+    overrides = getattr(params, "modelslim_precision", None) or {}
+    override = overrides.get("attention" if target == "fa" else "linear")
+    if override and override != "checkpoint":
+        return override
     policy = description.get("timestep_policy", {}).get(target, {})
     if not policy and not default_policy:
         return default
-    from sglang.multimodal_gen.runtime.managers.forward_context import (
-        get_forward_context,
-    )
-
-    step = get_forward_context().current_timestep
+    if context is None:
+        raise RuntimeError("ModelSlim timestep policy requires a forward context")
+    step = context.current_timestep
     fallback = (default_policy or {}).get(str(step), default)
     precision = policy.get(str(step), policy.get("default", fallback))
     allowed = {"fa": ("FLOAT", "FP8", "MXFP4"), "w4a4_linear": ("W4A4", "W4A8")}

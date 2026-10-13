@@ -14,6 +14,7 @@ from typing import List, Optional
 import torch
 
 from sglang.multimodal_gen.runtime.layers.quantization.modelslim_mxfp_utils import (
+    default_mxfp4_policy,
     mxfp4_quant_kwargs,
     resolve_precision,
 )
@@ -33,7 +34,6 @@ MXFP4_BLOCK_SIZE = 32
 # L1 block covers 16 * 32 = 512 elements.
 MXFP4_DUAL_LEVEL_RATIO = 16
 MXFP4_PACK_FACTOR = 2
-MXFP4_DEFAULT_TIMESTEP_POLICY = dict.fromkeys(("0", "1", "38", "39"), "W4A8")
 
 
 class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
@@ -217,12 +217,19 @@ class ModelSlimMXFP4Scheme(ModelSlimLinearScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from sglang.multimodal_gen.runtime.managers.forward_context import (
+            get_forward_context_or_none,
+        )
+
+        context = get_forward_context_or_none()
+        batch = context.forward_batch if context is not None else None
+        num_steps = getattr(batch, "num_inference_steps", 0)
         precision = resolve_precision(
             self.quant_config,
             "w4a4_linear",
             "W4A4",
             default_policy=(
-                None if self.is_dual_scale else MXFP4_DEFAULT_TIMESTEP_POLICY
+                None if self.is_dual_scale else default_mxfp4_policy(num_steps)
             ),
         )
         if not self.is_dual_scale:
