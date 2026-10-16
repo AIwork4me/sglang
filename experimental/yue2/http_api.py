@@ -4,6 +4,7 @@
 This module is intentionally kept out of the core multimodal API until the
 audio-generation request schema is upstreamed.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,16 +13,15 @@ from typing import Literal, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from sglang.multimodal_gen.configs.sample.sampling_params import generate_request_id
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     build_sampling_params,
     process_generation_batch,
 )
+from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
-from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
-from sglang.multimodal_gen.configs.sample.sampling_params import generate_request_id
 from sglang.srt.observability.trace import extract_trace_headers
-
 
 router = APIRouter(prefix="/v1/audio", tags=["audio"])
 
@@ -41,9 +41,12 @@ class Yue2AudioGenerationsRequest(BaseModel):
     vae_halo_frames: int = Field(16, ge=0)
     output_path: Optional[str] = Field(None, description="output directory")
     output_file_name: Optional[str] = Field(None, description="output file name")
-    cfg_scale: Optional[float] = Field(None, description="classifier-free guidance scale")
+    cfg_scale: Optional[float] = Field(
+        None, description="classifier-free guidance scale"
+    )
     artifacts_dir: Optional[str] = Field(
-        None, description="export plan/semantic/latent/request/config artifacts here")
+        None, description="export plan/semantic/latent/request/config artifacts here"
+    )
 
 
 @router.post("/generations")
@@ -103,9 +106,7 @@ async def generate_audio(
         "audio": audio_path,
         "sample_rate": 48000,
         "inference_time_s": (
-            result.metrics.total_duration_s
-            if result.metrics is not None
-            else None
+            result.metrics.total_duration_s if result.metrics is not None else None
         ),
         "peak_memory_mb": result.peak_memory_mb,
         "yue2_timing": extra.get("yue2_timing"),

@@ -3,16 +3,17 @@
 
 Independent songs share one :class:`~.cuda_graph.GraphAR` decode graph whose
 ``branches`` dimension doubles as the batch dimension: each row owns its prefix,
-KV slots, RoPE positions, and stop decision. 
+KV slots, RoPE positions, and stop decision.
 
-The AR expert weights are loaded to GPU memory once at server start, and then the 
-per-step GEMMs then **stream those same weights from HBM once per decode step**, 
+The AR expert weights are loaded to GPU memory once at server start, and then the
+per-step GEMMs then **stream those same weights from HBM once per decode step**,
 and batching amortises that bandwidth across all rows.
 
 ABC planning is still generated per request (it is short); only the expensive
 semantic codec phase is batched. The NAR/VAE stages stay per request and read
 each row's KV through a per-row branch index.
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,8 +32,9 @@ _logger = logging.getLogger(__name__)
 
 # Dedicated pool: batched sessions are keyed by (branches, capacity) and never
 # shared with the single-request / CFG pool.
-default_batched_pool = GraphSessionPool(max_sessions_per_key=int(
-    os.environ.get("SGLANG_YUE2_BATCHED_POOL", "2")))
+default_batched_pool = GraphSessionPool(
+    max_sessions_per_key=int(os.environ.get("SGLANG_YUE2_BATCHED_POOL", "2"))
+)
 
 
 def batched_ar_enabled() -> bool:
@@ -96,12 +98,14 @@ def generate_semantic_batched(
     sampler = getattr(session, "sampler", None)
     if not isinstance(sampler, BatchedGraphSampler) or sampler.B != B:
         if session.graph is not None and not session.step_mode:
-            raise RuntimeError(
-                "pooled session was captured without a batched sampler")
+            raise RuntimeError("pooled session was captured without a batched sampler")
         sampler = BatchedGraphSampler(
-            model.config.vocab_size, device,
+            model.config.vocab_size,
+            device,
             torch.Generator(device=device).manual_seed(int(seed)),
-            B, max_topk=MAX_GRAPH_TOPK)
+            B,
+            max_topk=MAX_GRAPH_TOPK,
+        )
         session.sampler = sampler
         session.step_mode = True
     else:
@@ -203,8 +207,9 @@ def generate_semantic_batched(
 
 
 @torch.inference_mode()
-def generate_abc_batched(model, session, prefixes, abc_sampling, *, seed=831001,
-                         cancelled=None):
+def generate_abc_batched(
+    model, session, prefixes, abc_sampling, *, seed=831001, cancelled=None
+):
     """Run the ABC planning phase for ``B`` rows on one pooled session.
 
     Returns ``(abc_ids, truncated)`` per row. The session is only used to plan;
@@ -221,9 +226,12 @@ def generate_abc_batched(model, session, prefixes, abc_sampling, *, seed=831001,
         if session.graph is not None and not session.step_mode:
             raise RuntimeError("pooled session was captured without a batched sampler")
         sampler = BatchedGraphSampler(
-            model.config.vocab_size, device,
+            model.config.vocab_size,
+            device,
             torch.Generator(device=device).manual_seed(int(seed)),
-            B, max_topk=MAX_GRAPH_TOPK)
+            B,
+            max_topk=MAX_GRAPH_TOPK,
+        )
         session.sampler = sampler
         session.step_mode = True
     else:
@@ -235,9 +243,14 @@ def generate_abc_batched(model, session, prefixes, abc_sampling, *, seed=831001,
 
     min_tokens = int(abc_sampling.min_tokens)
     sampler.configure_abc(
-        temperature=abc_sampling.temperature, top_p=abc_sampling.top_p,
-        top_k=abc_sampling.top_k, repetition_penalty=abc_sampling.repetition_penalty,
-        penalty_window=abc_sampling.penalty_window, end=ABC_END, min_tokens=min_tokens)
+        temperature=abc_sampling.temperature,
+        top_p=abc_sampling.top_p,
+        top_k=abc_sampling.top_k,
+        repetition_penalty=abc_sampling.repetition_penalty,
+        penalty_window=abc_sampling.penalty_window,
+        end=ABC_END,
+        min_tokens=min_tokens,
+    )
     sampler.sample_in_graph(logits)
     sampler.advance_in_graph()
 
@@ -275,8 +288,15 @@ def _abc_per_request(model, tokenizer, requests, configs, batches):
     for request, config, batch in zip(requests, configs, batches):
         prefix = list(batch.extra["yue2_prefix"])
         abc_ids, _timing, abc_truncated = generate_tokens(
-            model, prefix, config.abc, request.seed, phase="abc",
-            cfg_scale=1.0, use_cuda_graph=True, use_fast_sampler=True)
+            model,
+            prefix,
+            config.abc,
+            request.seed,
+            phase="abc",
+            cfg_scale=1.0,
+            use_cuda_graph=True,
+            use_fast_sampler=True,
+        )
         abc_ids_list.append(list(abc_ids))
         abc_truncated_list.append(bool(abc_truncated))
     return abc_ids_list, abc_truncated_list
@@ -303,14 +323,26 @@ def run_batched_ar(model, tokenizer, batches, generation_config):
             raise BatchedUnsupported("cot=off uses legacy arithmetic")
 
     semantic = configs[0].semantic
-    signature = (semantic.temperature, semantic.top_p, semantic.top_k,
-                 semantic.repetition_penalty, semantic.penalty_window,
-                 semantic.min_tokens, semantic.max_tokens)
+    signature = (
+        semantic.temperature,
+        semantic.top_p,
+        semantic.top_k,
+        semantic.repetition_penalty,
+        semantic.penalty_window,
+        semantic.min_tokens,
+        semantic.max_tokens,
+    )
     for config in configs[1:]:
         other = config.semantic
-        if signature != (other.temperature, other.top_p, other.top_k,
-                         other.repetition_penalty, other.penalty_window,
-                         other.min_tokens, other.max_tokens):
+        if signature != (
+            other.temperature,
+            other.top_p,
+            other.top_k,
+            other.repetition_penalty,
+            other.penalty_window,
+            other.min_tokens,
+            other.max_tokens,
+        ):
             raise BatchedUnsupported("semantic sampling params differ")
 
     base_prefixes = [list(batch.extra["yue2_prefix"]) for batch in batches]
@@ -319,35 +351,53 @@ def run_batched_ar(model, tokenizer, batches, generation_config):
     abc_started = time.perf_counter()
     try:
         abc_session = default_batched_pool.acquire(
-            model, base_prefixes, int(abc_sampling.max_tokens) + 4)
+            model, base_prefixes, int(abc_sampling.max_tokens) + 4
+        )
         try:
             abc_ids_list, abc_truncated_list = generate_abc_batched(
-                model, abc_session, base_prefixes, abc_sampling,
-                seed=int(requests[0].seed))
+                model,
+                abc_session,
+                base_prefixes,
+                abc_sampling,
+                seed=int(requests[0].seed),
+            )
         finally:
             default_batched_pool.release(abc_session)
     except Exception:
         _logger.exception("Batched ABC failed; falling back to per-request ABC")
         abc_ids_list, abc_truncated_list = _abc_per_request(
-            model, tokenizer, requests, configs, batches)
+            model, tokenizer, requests, configs, batches
+        )
     abc_seconds = time.perf_counter() - abc_started
     semantic_prefixes, abc_records = [], []
     for index, request in enumerate(requests):
         abc_ids = abc_ids_list[index]
         abc = tokenizer.decode(abc_ids) if abc_ids else None
         semantic_prefixes.append(token_prefixes(request, tokenizer, abc_ids=abc_ids))
-        abc_records.append((abc, list(abc_ids), {
-            "seconds": abc_seconds, "prefill_seconds": 0.0,
-            "output_tokens": len(abc_ids), "content_tokens": len(abc_ids),
-            "truncated": bool(abc_truncated_list[index]), "execution": "cuda_graph",
-            "attention": "batch", "sampler": "deepselect_batched_abc",
-        }, bool(abc_truncated_list[index])))
+        abc_records.append(
+            (
+                abc,
+                list(abc_ids),
+                {
+                    "seconds": abc_seconds,
+                    "prefill_seconds": 0.0,
+                    "output_tokens": len(abc_ids),
+                    "content_tokens": len(abc_ids),
+                    "truncated": bool(abc_truncated_list[index]),
+                    "execution": "cuda_graph",
+                    "attention": "batch",
+                    "sampler": "deepselect_batched_abc",
+                },
+                bool(abc_truncated_list[index]),
+            )
+        )
 
     budget = int(semantic.max_tokens) + 4
     session = default_batched_pool.acquire(model, semantic_prefixes, budget)
     try:
         codec, fed, truncated, semantic_timing = generate_semantic_batched(
-            model, session, semantic_prefixes, semantic, seed=int(requests[0].seed))
+            model, session, semantic_prefixes, semantic, seed=int(requests[0].seed)
+        )
     except Exception:
         default_batched_pool.release(session)
         raise
@@ -378,6 +428,10 @@ def run_batched_ar(model, tokenizer, batches, generation_config):
         )
     _logger.info(
         "Batched AR: %d rows in %.2fs (abc=%.2fs prefill=%.2fs semantic=%.2fs)",
-        len(batches), time.perf_counter() - started, abc_seconds,
-        semantic_timing.get("prefill_seconds", 0.0), semantic_timing["seconds"])
+        len(batches),
+        time.perf_counter() - started,
+        abc_seconds,
+        semantic_timing.get("prefill_seconds", 0.0),
+        semantic_timing["seconds"],
+    )
     return batches

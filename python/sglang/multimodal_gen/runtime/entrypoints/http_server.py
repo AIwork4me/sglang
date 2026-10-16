@@ -477,10 +477,11 @@ def create_app(server_args: ServerArgs):
             if _spec is not None and _spec.loader is not None:
                 _module = importlib.util.module_from_spec(_spec)
                 import sys as _sys
+
                 _sys.modules[_spec.name] = _module
                 _spec.loader.exec_module(_module)
                 app.include_router(_module.router)
-                
+
     app.include_router(weights_api.router)
     app.include_router(rollout_api.router)
 

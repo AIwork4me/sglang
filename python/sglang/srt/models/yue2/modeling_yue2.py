@@ -29,7 +29,6 @@ def sdpa(query, key, value, *, attn_mask=None, is_causal=False):
 
     # NOTE (yiakwy) : to be verified at M3 Ultra
     if grouped and query.device.type == "mps":
-
         # PyTorch's MPS attention does not implement enable_gqa on every release.
         groups = query.shape[1] // key.shape[1]
         key = key.repeat_interleave(groups, dim=1)
@@ -37,7 +36,11 @@ def sdpa(query, key, value, *, attn_mask=None, is_causal=False):
         grouped = False
 
     return F.scaled_dot_product_attention(
-        query, key, value, attn_mask=attn_mask, is_causal=is_causal,
+        query,
+        key,
+        value,
+        attn_mask=attn_mask,
+        is_causal=is_causal,
         enable_gqa=grouped,
     )
 
@@ -45,7 +48,9 @@ def sdpa(query, key, value, *, attn_mask=None, is_causal=False):
 def _causal_mask(attention_mask, cache_position, key_length, batch_size):
     """Physical cache slots are causal; RoPE positions may exclude padding."""
     device = cache_position.device
-    visible = torch.arange(key_length, device=device)[None, :] <= cache_position[:, None]
+    visible = (
+        torch.arange(key_length, device=device)[None, :] <= cache_position[:, None]
+    )
     visible = visible[None, None].expand(batch_size, 1, -1, -1)
     if attention_mask is None:
         return visible
@@ -72,20 +77,57 @@ def _causal_mask(attention_mask, cache_position, key_length, batch_size):
 class YuE2Config(PretrainedConfig):
     model_type = "yue2"
 
-    _hf_fields = frozenset({
-        "model_type", "architectures", "auto_map", "transformers_version",
-        "dtype", "torch_dtype", "return_dict", "output_hidden_states",
-        "output_attentions", "use_cache", "tie_word_embeddings", "torchscript",
-        "is_decoder", "is_encoder_decoder", "add_cross_attention",
-        "bos_token_id", "eos_token_id", "pad_token_id", "decoder_start_token_id",
-        "attn_implementation",
-    })
+    _hf_fields = frozenset(
+        {
+            "model_type",
+            "architectures",
+            "auto_map",
+            "transformers_version",
+            "dtype",
+            "torch_dtype",
+            "return_dict",
+            "output_hidden_states",
+            "output_attentions",
+            "use_cache",
+            "tie_word_embeddings",
+            "torchscript",
+            "is_decoder",
+            "is_encoder_decoder",
+            "add_cross_attention",
+            "bos_token_id",
+            "eos_token_id",
+            "pad_token_id",
+            "decoder_start_token_id",
+            "attn_implementation",
+        }
+    )
 
     def to_dict(self):
-        return {key: value for key, value in super().to_dict().items()
-                if key in self._hf_fields or key in self._inference_fields}
+        return {
+            key: value
+            for key, value in super().to_dict().items()
+            if key in self._hf_fields or key in self._inference_fields
+        }
 
-    _inference_fields = frozenset(['hidden_size', 'num_hidden_layers', 'num_attention_heads', 'num_key_value_heads', 'head_dim', 'intermediate_size', 'vocab_size', 'rms_norm_eps', 'rope_theta', 'max_position_embeddings', 'tie_word_embeddings', 'latent_type', 'latent_dim', 'max_latent_frames', 'timestep_shift'])
+    _inference_fields = frozenset(
+        [
+            "hidden_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "intermediate_size",
+            "vocab_size",
+            "rms_norm_eps",
+            "rope_theta",
+            "max_position_embeddings",
+            "tie_word_embeddings",
+            "latent_type",
+            "latent_dim",
+            "max_latent_frames",
+            "timestep_shift",
+        ]
+    )
 
     def __init__(
         self,
@@ -143,7 +185,13 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps).to(x.dtype) * self.weight
+        return (
+            x
+            * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps).to(
+                x.dtype
+            )
+            * self.weight
+        )
 
 
 class RotaryEmbedding(nn.Module):
@@ -155,15 +203,27 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._inv_freq is None or self._inv_freq.device != position_ids.device:
-            self._inv_freq = 1.0 / (self.base ** (
-                torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=position_ids.device) / self.head_dim
-            ))
+            self._inv_freq = 1.0 / (
+                self.base
+                ** (
+                    torch.arange(
+                        0,
+                        self.head_dim,
+                        2,
+                        dtype=torch.float32,
+                        device=position_ids.device,
+                    )
+                    / self.head_dim
+                )
+            )
         pos = position_ids.float().unsqueeze(-1)
         angles = pos * self._inv_freq
         return angles.cos(), angles.sin()
 
 
-def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def _apply_rotary(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
     cos, sin = cos.to(x.dtype), sin.to(x.dtype)
@@ -178,15 +238,26 @@ class Attention(nn.Module):
         self.head_dim = config.head_dim
         self.num_kv_groups = self.num_heads // self.num_kv_heads
 
-        self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
+        self.q_proj = nn.Linear(
+            config.hidden_size, self.num_heads * self.head_dim, bias=False
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, config.hidden_size, bias=False
+        )
         self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
 
     def project_qkv(
-        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Project, normalize, and apply RoPE. No SDPA, no KV cache, no O proj.
 
@@ -218,10 +289,12 @@ class Attention(nn.Module):
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
 
         if past_key_value is not None:
-            k, v = past_key_value.update(k, v, layer_idx, {"cache_position": cache_position})
+            k, v = past_key_value.update(
+                k, v, layer_idx, {"cache_position": cache_position}
+            )
 
         if attention_mask is not None:
-            out = sdpa(q, k, v, attn_mask=attention_mask[..., :k.shape[2]])
+            out = sdpa(q, k, v, attn_mask=attention_mask[..., : k.shape[2]])
         else:
             out = sdpa(q, k, v, is_causal=(T > 1 and k.shape[2] == T))
         return self.o_proj(out.transpose(1, 2).reshape(B, T, -1))
@@ -230,9 +303,15 @@ class Attention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: YuE2Config):
         super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.up_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -280,9 +359,9 @@ class DecoderLayer(nn.Module):
             q_nar, k_nar, v_nar = self.nar_self_attn.project_qkv(ln_nar, cos, sin)
 
             # Merge Q/K/V per-position: AR positions use AR projections, NAR use NAR
-            query = torch.where(mask_4d, q_ar, q_nar)    # [B, S, num_heads, hd]
+            query = torch.where(mask_4d, q_ar, q_nar)  # [B, S, num_heads, hd]
             # K/V have num_kv_heads (fewer), same mask broadcast works
-            key = torch.where(mask_4d, k_ar, k_nar)      # [B, S, num_kv_heads, hd]
+            key = torch.where(mask_4d, k_ar, k_nar)  # [B, S, num_kv_heads, hd]
             value = torch.where(mask_4d, v_ar, v_nar)
 
             # Transpose to [B, H, S, D] for SDPA
@@ -309,8 +388,15 @@ class DecoderLayer(nn.Module):
             mlp_out = torch.where(mask_3d, ar_out, nar_out)
         else:
             # AR-only mode (generation): use AR path only
-            h = self.self_attn(self.input_layernorm(x), cos, sin, past_key_value, layer_idx,
-                               attention_mask, cache_position)
+            h = self.self_attn(
+                self.input_layernorm(x),
+                cos,
+                sin,
+                past_key_value,
+                layer_idx,
+                attention_mask,
+                cache_position,
+            )
             x = x + h
             mlp_out = self.mlp(self.post_attention_layernorm(x))
 
@@ -338,7 +424,9 @@ class TimestepEmbedder(nn.Module):
     def forward(self, t):
         half = self.frequency_embedding_size // 2
         freqs = torch.exp(
-            -math.log(10000) * torch.arange(half, device=t.device, dtype=torch.float32) / half
+            -math.log(10000)
+            * torch.arange(half, device=t.device, dtype=torch.float32)
+            / half
         )
         args = t.float().unsqueeze(-1) * freqs.unsqueeze(0)
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -353,7 +441,8 @@ class AudioPositionEmbedding(nn.Module):
         pe = torch.zeros(max_frames, hidden_size)
         position = torch.arange(0, max_frames, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, hidden_size, 2, dtype=torch.float32) * (-math.log(10000.0) / hidden_size)
+            torch.arange(0, hidden_size, 2, dtype=torch.float32)
+            * (-math.log(10000.0) / hidden_size)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -376,18 +465,38 @@ class StaticKVCache:
     """
 
     def __init__(
-        self, num_layers: int, batch_size: int, num_kv_heads: int,
-        max_seq_len: int, head_dim: int, dtype: torch.dtype, device: torch.device,
+        self,
+        num_layers: int,
+        batch_size: int,
+        num_kv_heads: int,
+        max_seq_len: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
     ):
         self.num_layers = num_layers
         self.max_seq_len = max_seq_len
         self._seen_tokens = 0
         self.key_cache: List[torch.Tensor] = [
-            torch.zeros(batch_size, num_kv_heads, max_seq_len, head_dim, dtype=dtype, device=device)
+            torch.zeros(
+                batch_size,
+                num_kv_heads,
+                max_seq_len,
+                head_dim,
+                dtype=dtype,
+                device=device,
+            )
             for _ in range(num_layers)
         ]
         self.value_cache: List[torch.Tensor] = [
-            torch.zeros(batch_size, num_kv_heads, max_seq_len, head_dim, dtype=dtype, device=device)
+            torch.zeros(
+                batch_size,
+                num_kv_heads,
+                max_seq_len,
+                head_dim,
+                dtype=dtype,
+                device=device,
+            )
             for _ in range(num_layers)
         ]
 
@@ -399,19 +508,27 @@ class StaticKVCache:
         pos = self._seen_tokens
         end = pos + T
         if end > self.max_seq_len:
-            raise ValueError(f"KV cache capacity {self.max_seq_len} exceeded by {end}; generation was not shortened")
+            raise ValueError(
+                f"KV cache capacity {self.max_seq_len} exceeded by {end}; generation was not shortened"
+            )
         self.key_cache[layer_idx][:, :, pos:end] = key_states
         self.value_cache[layer_idx][:, :, pos:end] = value_states
         if layer_idx == self.num_layers - 1:
             self._seen_tokens = end
-        return self.key_cache[layer_idx][:, :, :end], self.value_cache[layer_idx][:, :, :end]
+        return self.key_cache[layer_idx][:, :, :end], self.value_cache[layer_idx][
+            :, :, :end
+        ]
 
     def reset(self):
         self._seen_tokens = 0
 
     def reorder_cache(self, beam_idx):
-        self.key_cache = [v.index_select(0, beam_idx.to(v.device)) for v in self.key_cache]
-        self.value_cache = [v.index_select(0, beam_idx.to(v.device)) for v in self.value_cache]
+        self.key_cache = [
+            v.index_select(0, beam_idx.to(v.device)) for v in self.key_cache
+        ]
+        self.value_cache = [
+            v.index_select(0, beam_idx.to(v.device)) for v in self.value_cache
+        ]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -425,7 +542,9 @@ class Backbone(nn.Module):
     def __init__(self, config: YuE2Config):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = RotaryEmbedding(config.head_dim, config.rope_theta)
 
@@ -450,9 +569,16 @@ class Backbone(nn.Module):
             past_key_values = DynamicCache()
 
         for i, layer in enumerate(self.layers):
-            x = layer(x, cos, sin, past_key_values if use_cache else None,
-                      layer_idx=i, attention_mask=attention_mask, ar_mask=ar_mask,
-                      cache_position=cache_position)
+            x = layer(
+                x,
+                cos,
+                sin,
+                past_key_values if use_cache else None,
+                layer_idx=i,
+                attention_mask=attention_mask,
+                ar_mask=ar_mask,
+                cache_position=cache_position,
+            )
 
         return self.norm(x), past_key_values
 
@@ -485,7 +611,9 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
         self.llm2vae = nn.Linear(config.hidden_size, config.latent_dim)
         self.vae2llm = nn.Linear(config.latent_dim, config.hidden_size)
         self.time_embedder = TimestepEmbedder(config.hidden_size)
-        self.latent_pos_embed = AudioPositionEmbedding(config.max_latent_frames, config.hidden_size)
+        self.latent_pos_embed = AudioPositionEmbedding(
+            config.max_latent_frames, config.hidden_size
+        )
 
         self.post_init()
 
@@ -519,20 +647,32 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("Supply exactly one of input_ids or inputs_embeds")
-        use_cache = use_cache if use_cache is not None else getattr(self.config, "use_cache", True)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_cache = (
+            use_cache
+            if use_cache is not None
+            else getattr(self.config, "use_cache", True)
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
         tensor = input_ids if input_ids is not None else inputs_embeds
         batch_size, seq_len = tensor.shape[:2]
         if not seq_len:
             raise ValueError("Input must contain at least one token")
         device = tensor.device
-        past_len = past_key_values.get_seq_length() if past_key_values is not None and use_cache else 0
+        past_len = (
+            past_key_values.get_seq_length()
+            if past_key_values is not None and use_cache
+            else 0
+        )
         if cache_position is None:
             cache_position = torch.arange(past_len, past_len + seq_len, device=device)
         else:
             cache_position = cache_position.to(device=device, dtype=torch.long)
         if cache_position.ndim != 1 or cache_position.numel() != seq_len:
-            raise ValueError("cache_position must identify each current token's physical cache slot")
+            raise ValueError(
+                "cache_position must identify each current token's physical cache slot"
+            )
         if position_ids is None:
             if attention_mask is not None and attention_mask.ndim == 2:
                 position_ids = attention_mask.long().cumsum(-1) - 1
@@ -546,26 +686,45 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
             raise ValueError("position_ids must cover the current input tokens")
 
         key_length = past_len + seq_len
-        if use_cache and past_key_values is not None and hasattr(past_key_values, "get_max_cache_shape"):
+        if (
+            use_cache
+            and past_key_values is not None
+            and hasattr(past_key_values, "get_max_cache_shape")
+        ):
             capacity = past_key_values.get_max_cache_shape()
             if capacity is not None and capacity > 0:
                 key_length = capacity
         # No explicit mask is needed for unpadded prefill or single-token dynamic
         # decode. Chunked prefill needs bottom-right causal alignment; a full
         # static cache additionally needs to hide all unfilled slots.
-        needs_mask = attention_mask is not None or key_length != past_len + seq_len or (past_len > 0 and seq_len > 1)
-        causal_mask = _causal_mask(attention_mask, cache_position, key_length, batch_size) if needs_mask else None
+        needs_mask = (
+            attention_mask is not None
+            or key_length != past_len + seq_len
+            or (past_len > 0 and seq_len > 1)
+        )
+        causal_mask = (
+            _causal_mask(attention_mask, cache_position, key_length, batch_size)
+            if needs_mask
+            else None
+        )
         hidden_states, past_key_values = self.model(
-            input_ids=input_ids, position_ids=position_ids,
-            past_key_values=past_key_values, use_cache=use_cache,
-            attention_mask=causal_mask, inputs_embeds=inputs_embeds,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            attention_mask=causal_mask,
+            inputs_embeds=inputs_embeds,
             cache_position=cache_position,
         )
 
         if isinstance(logits_to_keep, int):
             if logits_to_keep < 0:
                 raise ValueError("logits_to_keep must be nonnegative")
-            selected = hidden_states[:, -logits_to_keep:, :] if logits_to_keep else hidden_states
+            selected = (
+                hidden_states[:, -logits_to_keep:, :]
+                if logits_to_keep
+                else hidden_states
+            )
         else:
             selected = hidden_states[:, logits_to_keep.to(device), :]
         if labels is not None and selected.shape[1] != hidden_states.shape[1]:
@@ -576,45 +735,74 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
 
         if not return_dict:
             output = (logits, past_key_values) if use_cache else (logits,)
             return ((loss,) + output) if loss is not None else output
-        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=past_key_values if use_cache else None)
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=past_key_values if use_cache else None,
+        )
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None,
-        inputs_embeds=None, cache_position=None, position_ids=None, **kwargs,
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        **kwargs,
     ):
         """Keep physical cache slots separate from padding-aware RoPE positions."""
-        past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_len = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
         if cache_position is None:
-            total = inputs_embeds.shape[1] if inputs_embeds is not None and past_len == 0 else input_ids.shape[1]
+            total = (
+                inputs_embeds.shape[1]
+                if inputs_embeds is not None and past_len == 0
+                else input_ids.shape[1]
+            )
             count = max(total - past_len, 1) if past_len else total
-            cache_position = torch.arange(past_len, past_len + count, device=input_ids.device)
+            cache_position = torch.arange(
+                past_len, past_len + count, device=input_ids.device
+            )
         count = cache_position.numel()
         use_embeds = inputs_embeds is not None and past_len == 0
         if use_embeds:
             current_ids, current_embeds = None, inputs_embeds[:, -count:]
         else:
             current_ids, current_embeds = input_ids[:, -count:].contiguous(), None
-        if position_ids is None and attention_mask is not None and attention_mask.ndim == 2:
+        if (
+            position_ids is None
+            and attention_mask is not None
+            and attention_mask.ndim == 2
+        ):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
         if position_ids is not None:
             position_ids = position_ids[:, -count:].contiguous()
         return {
-            "input_ids": current_ids, "inputs_embeds": current_embeds,
-            "past_key_values": past_key_values, "attention_mask": attention_mask,
-            "position_ids": position_ids, "cache_position": cache_position,
+            "input_ids": current_ids,
+            "inputs_embeds": current_embeds,
+            "past_key_values": past_key_values,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "cache_position": cache_position,
             "use_cache": kwargs.get("use_cache", True),
             "logits_to_keep": kwargs.get("logits_to_keep", 1),
         }
 
     # ── NAR velocity (flow matching, no KV cache) ────────────────────
 
-    def _shift_t_value(self, t_value: float, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    def _shift_t_value(
+        self, t_value: float, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         t_sig = torch.sigmoid(torch.tensor(t_value, dtype=dtype, device=device))
         shift = self.config.timestep_shift
         return shift * t_sig / (1 + (shift - 1) * t_sig)
@@ -663,7 +851,7 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
 
         # Build x_t for all NAR positions: zeros for START/END, actual x_t for content
         x_nar = torch.zeros(N_nar, x_t.shape[1], device=device, dtype=dtype)
-        x_nar[1:1 + T_lat] = x_t.to(dtype)  # content frames at positions [1, T_lat]
+        x_nar[1 : 1 + T_lat] = x_t.to(dtype)  # content frames at positions [1, T_lat]
 
         latent_hidden_nar = self.vae2llm(x_nar.unsqueeze(0))  # [1, N_nar, H]
 
@@ -672,7 +860,9 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
         latent_hidden_nar = latent_hidden_nar + time_emb
 
         # Position embedding: cumsum-style [0, 1, 2, ..., N_nar-1]
-        pos_ids = torch.arange(N_nar, device=device).clamp(max=self.config.max_latent_frames - 1)
+        pos_ids = torch.arange(N_nar, device=device).clamp(
+            max=self.config.max_latent_frames - 1
+        )
         pos_emb = self.latent_pos_embed(pos_ids).unsqueeze(0)
         latent_hidden_nar = latent_hidden_nar + pos_emb
 
@@ -681,8 +871,8 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
 
         # 3. Build hybrid attention mask [B, 1, S, S]
         # AR→AR: causal, NAR→AR: full, NAR→NAR: bidirectional, AR→NAR: blocked
-        ar_q = ar_mask.unsqueeze(2).float()   # [B, S, 1]
-        ar_k = ar_mask.unsqueeze(1).float()   # [B, 1, S]
+        ar_q = ar_mask.unsqueeze(2).float()  # [B, S, 1]
+        ar_k = ar_mask.unsqueeze(1).float()  # [B, 1, S]
         nar_q = nar_mask.unsqueeze(2).float()
         nar_k = nar_mask.unsqueeze(1).float()
         causal = torch.tril(torch.ones(S, S, device=device))
@@ -696,7 +886,9 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
             mask = (ar_q * ar_k * causal) + (nar_q * ar_k) + (nar_q * nar_k)
         # Convert to additive: 0 → attend, -inf → block
         attn_mask = mask.unsqueeze(1)  # [B, 1, S, S]
-        attn_mask = attn_mask.masked_fill(attn_mask == 0, float("-inf")).masked_fill(attn_mask > 0, 0.0)
+        attn_mask = attn_mask.masked_fill(attn_mask == 0, float("-inf")).masked_fill(
+            attn_mask > 0, 0.0
+        )
 
         # 4. Position IDs + RoPE
         position_ids = torch.arange(S, device=device).unsqueeze(0)
@@ -704,14 +896,18 @@ class YuE2ForCausalLM(YuE2PreTrainedModel, GenerationMixin):
         # 5. Forward through decoder (with MoT routing)
         ar_mask_bt = ar_mask  # [B, S] bool for MoT routing
         hidden_states, _ = self.model(
-            inputs_embeds=token_emb, position_ids=position_ids,
-            use_cache=False, attention_mask=attn_mask, ar_mask=ar_mask_bt,
+            inputs_embeds=token_emb,
+            position_ids=position_ids,
+            use_cache=False,
+            attention_mask=attn_mask,
+            ar_mask=ar_mask_bt,
         )
 
         # 6. NAR head at content positions
         nar_pred = self.llm2vae(hidden_states)  # [B, S, D]
         v_pred = nar_pred[0, content_indices]  # [T_lat, D]
         return v_pred
+
 
 # Keep custom code + auto_map when a local user calls save_pretrained as well
 # as when the release builder creates a Hub repository.

@@ -8,10 +8,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-
 from sglang.srt.models.yue2.nar import synthesize as nar_synthesize
 from sglang.srt.models.yue2.protocol import CODEC_OFFSET, CONTEXT, SongRequest
-
 
 logger = init_logger(__name__)
 
@@ -57,28 +55,36 @@ class Yue2NARStage(PipelineStage):
             if batch.extra.get("yue2_session") is not session:
                 raise _NarBatchUnsupported("rows do not share one AR session")
             if not batch.extra.get("yue2_nar_skip_feed") or batch.extra.get(
-                    "yue2_batched_truncated"):
+                "yue2_batched_truncated"
+            ):
                 raise _NarBatchUnsupported("row needs a tail feed or is truncated")
             if int(getattr(batch.sampling_params, "ode_steps", 32)) != steps:
                 raise _NarBatchUnsupported("ode_steps differ")
             request: SongRequest = batch.extra["yue2_request"]
             branches.append(int(batch.extra.get("yue2_session_branch", 0)))
             prefix_lens.append(len(batch.extra["yue2_semantic_prefix"]))
-            codecs.append([int(token) - CODEC_OFFSET
-                           for token in batch.extra["yue2_semantic_ids"]])
+            codecs.append(
+                [
+                    int(token) - CODEC_OFFSET
+                    for token in batch.extra["yue2_semantic_ids"]
+                ]
+            )
             seeds.append(request.seed)
 
         started = time.perf_counter()
         try:
             latents = synthesize_batched(
-                self.model, session, branches, prefix_lens, codecs, seeds, steps)
+                self.model, session, branches, prefix_lens, codecs, seeds, steps
+            )
         finally:
             for batch in batches:
                 if batch.extra.get("yue2_session") is session:
                     self._release_session(
-                        batch, session, batch.extra.get("yue2_session_lease"))
-        logger.info("Batched NAR: %d rows in %.2fs", len(batches),
-                    time.perf_counter() - started)
+                        batch, session, batch.extra.get("yue2_session_lease")
+                    )
+        logger.info(
+            "Batched NAR: %d rows in %.2fs", len(batches), time.perf_counter() - started
+        )
 
         for batch, latent in zip(batches, latents):
             batch.extra.update(

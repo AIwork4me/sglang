@@ -43,13 +43,12 @@ def _resolved_sglang_has_yue2() -> bool:
     readiness deadline (20 minutes) before reporting anything.
     """
     try:
-        import sglang
-
         from sglang.multimodal_gen.registry import get_model_info
 
         return get_model_info(MODEL_PATH) is not None
     except Exception:
         return False
+
 
 MODEL_PATH = os.environ.get("SGLANG_TEST_YUE2_MODEL", "m-a-p/YuE2-3B")
 VAE_DIR = os.environ.get("SGLANG_TEST_YUE2_VAE", "")
@@ -123,8 +122,10 @@ def _generations(diffusion_server, payload: dict) -> dict:
 
 def _read_wav(path: str) -> tuple[int, int, bytes]:
     with wave.open(path, "rb") as handle:
-        return handle.getframerate(), handle.getnframes(), handle.readframes(
-            handle.getnframes()
+        return (
+            handle.getframerate(),
+            handle.getnframes(),
+            handle.readframes(handle.getnframes()),
         )
 
 
@@ -137,7 +138,13 @@ def _assert_valid_audio(data: dict) -> None:
     assert rate == 48000
     assert frames > 0
     # Not digital silence: a rendered song must carry signal energy.
-    assert max(abs(int.from_bytes(pcm[i : i + 2], "little", signed=True)) for i in range(0, len(pcm), 4096 * 2)) > 16
+    assert (
+        max(
+            abs(int.from_bytes(pcm[i : i + 2], "little", signed=True))
+            for i in range(0, len(pcm), 4096 * 2)
+        )
+        > 16
+    )
 
 
 def test_yue2_audio_generations(diffusion_server, case):

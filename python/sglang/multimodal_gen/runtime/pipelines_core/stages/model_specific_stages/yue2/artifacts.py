@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Optional per-request artifact export pipeline stage."""
+
 from __future__ import annotations
 
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-
 from sglang.srt.models.yue2.protocol import CODEC_OFFSET, SongRequest
 from sglang.srt.models.yue2.storage import export_song_artifacts
 
@@ -30,8 +30,7 @@ class Yue2ArtifactExportStage(PipelineStage):
             request=request,
             latents=batch.extra["yue2_latents"],
             semantic_ids=[
-                int(token) - CODEC_OFFSET
-                for token in batch.extra["yue2_semantic_ids"]
+                int(token) - CODEC_OFFSET for token in batch.extra["yue2_semantic_ids"]
             ],
             prefix_ids=[int(token) for token in batch.extra["yue2_semantic_prefix"]],
             abc_ids=[int(token) for token in batch.extra.get("yue2_abc_ids") or []],

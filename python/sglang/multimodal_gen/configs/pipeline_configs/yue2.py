@@ -43,7 +43,7 @@ class Yue2PipelineConfig(PipelineConfig):
         """
         return True
 
-    # NOTE (yiakwy) : as 2-stage streaming method, we evalate cost to merge requests
+    # NOTE (yiakwy) : as 2-stage streaming method, we evaluate cost to merge requests
     def estimate_request_cost(self, batch) -> float:
         """Relative admission cost = estimated AR token volume of one request.
 
@@ -55,7 +55,9 @@ class Yue2PipelineConfig(PipelineConfig):
         ``1.0`` for requests without the YuE2 sampling fields.
         """
         params = getattr(batch, "sampling_params", None)
-        semantic = float(getattr(params, "semantic_max_tokens", 0) or 0) if params else 0.0
+        semantic = (
+            float(getattr(params, "semantic_max_tokens", 0) or 0) if params else 0.0
+        )
         abc = float(getattr(params, "abc_max_tokens", 0) or 0) if params else 0.0
         if semantic <= 0 and abc <= 0:
             # Not a YuE2 request (fields absent): defer to the base estimator.
@@ -84,9 +86,8 @@ class Yue2PipelineConfig(PipelineConfig):
 
 
 def register():
-    from sglang.multimodal_gen.registry import register_configs
-
     from sglang.multimodal_gen.configs.sample.yue2 import Yue2SamplingParams
+    from sglang.multimodal_gen.registry import register_configs
 
     register_configs(
         sampling_param_cls=Yue2SamplingParams,
