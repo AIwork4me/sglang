@@ -7,6 +7,7 @@ splits the codec stream into small independent acoustic chunks and decodes each
 chunk immediately. Chunk boundaries are therefore a serving policy, not part of
 the model protocol.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 import torch
 
 from .modeling_vae import YuE2VAE
-from .nar import Chunk, CachedNAR
+from .nar import CachedNAR, Chunk
 from .protocol import CODEC_OFFSET, CONTEXT, MUSIC_END
 
 

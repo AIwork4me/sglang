@@ -13,6 +13,7 @@ skipped entirely: it imports fine but dispatches to CUDA-only FA kernels that
 fail at call time (e.g. ``ModuleNotFoundError: flash_attn``), while the native
 ATen varlen path is the validated Radeon route (honours ``seqused_k``/GQA).
 """
+
 from __future__ import annotations
 
 import os
@@ -48,8 +49,7 @@ def fa3_available() -> bool:
     return _load_varlen() is not None
 
 
-def varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_q, max_k,
-                     seqused_k=None):
+def varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_q, max_k, seqused_k=None):
     """Ragged, non-causal attention (FA3 when available, else native ATen).
 
     ``q`` is ``[sum(q_len), HQ, HD]`` and ``k``/``v`` are ``[sum(k_len), HKV, HD]``;
@@ -58,8 +58,28 @@ def varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_q, max_k,
     """
     varlen = _load_varlen()
     if varlen is not None:
-        return varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_q, max_k,
-                      seqused_k=seqused_k, causal=False, ver=3)
+        return varlen(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_q,
+            max_k,
+            seqused_k=seqused_k,
+            causal=False,
+            ver=3,
+        )
     return torch.ops.aten._flash_attention_forward(
-        q, k, v, cu_seqlens_q, cu_seqlens_k, max_q, max_k, 0.0, False, False,
-        seqused_k=seqused_k)[0]
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_q,
+        max_k,
+        0.0,
+        False,
+        False,
+        seqused_k=seqused_k,
+    )[0]

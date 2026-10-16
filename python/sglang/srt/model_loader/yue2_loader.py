@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoint loader for the YuE2 AR-NAR music model."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ class Yue2Runtime:
         model_dir: str | Path,
         vae_dir: str | Path,
         device: torch.device | None = None,
-    ) -> "Yue2Runtime":
+    ) -> Yue2Runtime:
         model_dir, vae_dir = Path(model_dir), Path(vae_dir)
         device = device or torch.device("cuda", torch.cuda.current_device())
 

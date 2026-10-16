@@ -3,8 +3,9 @@
 
 The AR decode session already holds the exact key/value cache of
 ``prefix + codec tokens + MUSIC_END`` (the NAR "original chunk" tokens): the
-semantic phase wrote it slot by slot. 
+semantic phase wrote it slot by slot.
 """
+
 from __future__ import annotations
 
 import os
@@ -15,7 +16,6 @@ import torch.nn.functional as F
 
 from .fa3 import varlen_attention
 from .protocol import MUSIC_END, chunk_ranges
-
 
 _SGL_KERNEL = None
 
@@ -45,10 +45,16 @@ def model_fused_nar_weights(model):
         layers = []
         for layer in model.model.layers:
             qkv = torch.cat(
-                [layer.nar_self_attn.q_proj.weight, layer.nar_self_attn.k_proj.weight,
-                 layer.nar_self_attn.v_proj.weight], dim=0).contiguous()
+                [
+                    layer.nar_self_attn.q_proj.weight,
+                    layer.nar_self_attn.k_proj.weight,
+                    layer.nar_self_attn.v_proj.weight,
+                ],
+                dim=0,
+            ).contiguous()
             gate_up = torch.cat(
-                [layer.nar_mlp.gate_proj.weight, layer.nar_mlp.up_proj.weight], dim=0).contiguous()
+                [layer.nar_mlp.gate_proj.weight, layer.nar_mlp.up_proj.weight], dim=0
+            ).contiguous()
             layers.append((qkv, gate_up))
         model._yue2_fused_nar_weights = layers
         cached = layers
@@ -83,8 +89,11 @@ class SessionNAR:
         self.fused = model_fused_nar_weights(model)
         config = model.config
         self.B, self.H = 1, config.hidden_size
-        self.HQ, self.HKV, self.HD = (config.num_attention_heads,
-                                      config.num_key_value_heads, config.head_dim)
+        self.HQ, self.HKV, self.HD = (
+            config.num_attention_heads,
+            config.num_key_value_heads,
+            config.head_dim,
+        )
         self.eps = config.rms_norm_eps
         self.device = session.device
         self.dtype = session.dtype
@@ -96,27 +105,37 @@ class SessionNAR:
 
         # Per-layer velocity KV: [AR KV | NAR KV], exact length, no masking.
         shape = (1, total, self.HKV, self.HD)
-        
-        self.keys = [torch.empty(shape, device=self.device, dtype=self.dtype)
-                     for _ in model.model.layers]
-        self.values = [torch.empty(shape, device=self.device, dtype=self.dtype)
-                       for _ in model.model.layers]
-        
+
+        self.keys = [
+            torch.empty(shape, device=self.device, dtype=self.dtype)
+            for _ in model.model.layers
+        ]
+        self.values = [
+            torch.empty(shape, device=self.device, dtype=self.dtype)
+            for _ in model.model.layers
+        ]
+
         with torch.no_grad():
             for index in range(len(model.model.layers)):
-                self.keys[index][0, :self.ar_length].copy_(
-                    session.keys[index][self.branch, :self.ar_length])
-                self.values[index][0, :self.ar_length].copy_(
-                    session.values[index][self.branch, :self.ar_length])
-                
-        self.cu_q = torch.tensor([0, self.nar_length], dtype=torch.int32, device=self.device)
+                self.keys[index][0, : self.ar_length].copy_(
+                    session.keys[index][self.branch, : self.ar_length]
+                )
+                self.values[index][0, : self.ar_length].copy_(
+                    session.values[index][self.branch, : self.ar_length]
+                )
+
+        self.cu_q = torch.tensor(
+            [0, self.nar_length], dtype=torch.int32, device=self.device
+        )
         self.cu_k = torch.tensor([0, total], dtype=torch.int32, device=self.device)
-        self.nar_pos = torch.arange(self.ar_length, total, device=self.device,
-                                    dtype=torch.int32)
-        
+        self.nar_pos = torch.arange(
+            self.ar_length, total, device=self.device, dtype=torch.int32
+        )
+
         local = torch.arange(self.nar_length, device=self.device).clamp(
-            max=config.max_latent_frames - 1)
-        
+            max=config.max_latent_frames - 1
+        )
+
         self.pos_emb = model.latent_pos_embed(local)[None]
         self.layers = model.model.layers
         self.last = len(self.layers) - 1
@@ -137,41 +156,70 @@ class SessionNAR:
         residual = residual + self.pos_emb
 
         hidden = kernel.rmsnorm(
-            residual.view(B * self.nar_length, H), self.layers[0].nar_input_layernorm.weight, eps
+            residual.view(B * self.nar_length, H),
+            self.layers[0].nar_input_layernorm.weight,
+            eps,
         ).view(B, self.nar_length, H)
 
         for index, layer in enumerate(self.layers):
             qkv_w, gate_up_w = self.fused[index]
             qkv = F.linear(hidden.view(B * self.nar_length, H), qkv_w)
             kernel.fused_qk_norm_rope(
-                qkv, HQ, HKV, HKV, HD, eps,
-                layer.nar_self_attn.q_norm.weight, layer.nar_self_attn.k_norm.weight,
-                model.config.rope_theta, True, self.nar_pos, 1.0, 0.0, 0.0, 1.0,
+                qkv,
+                HQ,
+                HKV,
+                HKV,
+                HD,
+                eps,
+                layer.nar_self_attn.q_norm.weight,
+                layer.nar_self_attn.k_norm.weight,
+                model.config.rope_theta,
+                True,
+                self.nar_pos,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
             )
 
             q = qkv[:, : HQ * HD].view(self.nar_length, HQ, HD)
-            k = qkv[:, HQ * HD: (HQ + HKV) * HD].view(self.nar_length, HKV, HD)
-            v = qkv[:, (HQ + HKV) * HD:].view(self.nar_length, HKV, HD)
+            k = qkv[:, HQ * HD : (HQ + HKV) * HD].view(self.nar_length, HKV, HD)
+            v = qkv[:, (HQ + HKV) * HD :].view(self.nar_length, HKV, HD)
             keys, values = self.keys[index], self.values[index]
 
-            keys[0, self.ar_length:] = k
-            values[0, self.ar_length:] = v
+            keys[0, self.ar_length :] = k
+            values[0, self.ar_length :] = v
 
             h = _flash_varlen(
-                q, keys[0], values[0], self.cu_q, self.cu_k,
-                self.nar_length, self.ar_length + self.nar_length)
+                q,
+                keys[0],
+                values[0],
+                self.cu_q,
+                self.cu_k,
+                self.nar_length,
+                self.ar_length + self.nar_length,
+            )
             attn = layer.nar_self_attn.o_proj(h.reshape(self.nar_length, HQ * HD))
             kernel.fused_add_rmsnorm(
-                attn, residual.view(B * self.nar_length, H), layer.nar_pre_mlp_layernorm.weight, eps)
-            
+                attn,
+                residual.view(B * self.nar_length, H),
+                layer.nar_pre_mlp_layernorm.weight,
+                eps,
+            )
+
             # TODO (yiakwy) : fuse linear into rmsnorm
             gate_up = F.linear(attn, gate_up_w)
 
             mlp = layer.nar_mlp.down_proj(kernel.silu_and_mul(gate_up))
-            next_weight = (self.layers[index + 1].nar_input_layernorm.weight
-                           if index < self.last else model.model.norm.weight)
-            
-            kernel.fused_add_rmsnorm(mlp, residual.view(B * self.nar_length, H), next_weight, eps)
+            next_weight = (
+                self.layers[index + 1].nar_input_layernorm.weight
+                if index < self.last
+                else model.model.norm.weight
+            )
+
+            kernel.fused_add_rmsnorm(
+                mlp, residual.view(B * self.nar_length, H), next_weight, eps
+            )
 
             hidden = mlp.view(B, self.nar_length, H)
 
@@ -184,15 +232,25 @@ class SessionNAR:
         dt = 1.0 / steps
         for step in range(steps):
             t = 1.0 - step * dt
-            raw = torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
+            raw = (
+                torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu"))
+                .clamp(-20, 20)
+                .item()
+            )
             first = self.velocity(state, raw)
             mid = state - first * (dt / 2)
-            raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
+            raw_mid = (
+                torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu"))
+                .clamp(-20, 20)
+                .item()
+            )
             state = state - self.velocity(mid, raw_mid) * dt
         result = state.float().cpu()
 
         if not torch.isfinite(result).all():
-            raise FloatingPointError("Acoustic flow matching produced non-finite latents")
+            raise FloatingPointError(
+                "Acoustic flow matching produced non-finite latents"
+            )
         return result
 
 
@@ -214,8 +272,11 @@ class BatchedSessionNAR:
         self.fused = model_fused_nar_weights(model)
         config = model.config
         self.H = config.hidden_size
-        self.HQ, self.HKV, self.HD = (config.num_attention_heads,
-                                      config.num_key_value_heads, config.head_dim)
+        self.HQ, self.HKV, self.HD = (
+            config.num_attention_heads,
+            config.num_key_value_heads,
+            config.head_dim,
+        )
         self.eps = config.rms_norm_eps
         self.device, self.dtype = session.device, session.dtype
         self.n = len(ar_lengths)
@@ -238,27 +299,46 @@ class BatchedSessionNAR:
 
         layers = model.model.layers
         shape = (self.k_off[-1], self.HKV, self.HD)
-        self.keys = [torch.empty(shape, device=self.device, dtype=self.dtype)
-                     for _ in layers]
-        self.values = [torch.empty(shape, device=self.device, dtype=self.dtype)
-                       for _ in layers]
+        self.keys = [
+            torch.empty(shape, device=self.device, dtype=self.dtype) for _ in layers
+        ]
+        self.values = [
+            torch.empty(shape, device=self.device, dtype=self.dtype) for _ in layers
+        ]
         with torch.no_grad():
             for row in range(self.n):
-                start, length, branch = self.k_off[row], self.ar[row], self.branches[row]
+                start, length, branch = (
+                    self.k_off[row],
+                    self.ar[row],
+                    self.branches[row],
+                )
                 for index in range(len(layers)):
-                    self.keys[index][start:start + length].copy_(
-                        session.keys[index][branch, :length])
-                    self.values[index][start:start + length].copy_(
-                        session.values[index][branch, :length])
+                    self.keys[index][start : start + length].copy_(
+                        session.keys[index][branch, :length]
+                    )
+                    self.values[index][start : start + length].copy_(
+                        session.values[index][branch, :length]
+                    )
 
-        self.nar_pos = torch.cat([
-            torch.arange(self.ar[row], self.ar[row] + self.nar[row],
-                         device=self.device, dtype=torch.int32)
-            for row in range(self.n)])
-        local = torch.cat([
-            torch.arange(self.nar[row], device=self.device).clamp(
-                max=config.max_latent_frames - 1)
-            for row in range(self.n)])
+        self.nar_pos = torch.cat(
+            [
+                torch.arange(
+                    self.ar[row],
+                    self.ar[row] + self.nar[row],
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+                for row in range(self.n)
+            ]
+        )
+        local = torch.cat(
+            [
+                torch.arange(self.nar[row], device=self.device).clamp(
+                    max=config.max_latent_frames - 1
+                )
+                for row in range(self.n)
+            ]
+        )
         self.pos_emb = model.latent_pos_embed(local)
         self.layers = layers
         self.last = len(layers) - 1
@@ -275,61 +355,89 @@ class BatchedSessionNAR:
         residual = residual + model.time_embedder(shifted.expand(self.sum_nar))
         residual = residual + self.pos_emb
         hidden = kernel.rmsnorm(
-            residual, self.layers[0].nar_input_layernorm.weight, eps)
+            residual, self.layers[0].nar_input_layernorm.weight, eps
+        )
 
         for index, layer in enumerate(self.layers):
             qkv_w, gate_up_w = self.fused[index]
             qkv = F.linear(hidden, qkv_w)
             kernel.fused_qk_norm_rope(
-                qkv, HQ, HKV, HKV, HD, eps,
-                layer.nar_self_attn.q_norm.weight, layer.nar_self_attn.k_norm.weight,
-                model.config.rope_theta, True, self.nar_pos, 1.0, 0.0, 0.0, 1.0,
+                qkv,
+                HQ,
+                HKV,
+                HKV,
+                HD,
+                eps,
+                layer.nar_self_attn.q_norm.weight,
+                layer.nar_self_attn.k_norm.weight,
+                model.config.rope_theta,
+                True,
+                self.nar_pos,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
             )
             q = qkv[:, : HQ * HD].view(self.sum_nar, HQ, HD)
-            k = qkv[:, HQ * HD: (HQ + HKV) * HD].view(self.sum_nar, HKV, HD)
-            v = qkv[:, (HQ + HKV) * HD:].view(self.sum_nar, HKV, HD)
+            k = qkv[:, HQ * HD : (HQ + HKV) * HD].view(self.sum_nar, HKV, HD)
+            v = qkv[:, (HQ + HKV) * HD :].view(self.sum_nar, HKV, HD)
             keys, values = self.keys[index], self.values[index]
             for row in range(self.n):
                 qo, ko = self.q_off[row], self.k_off[row]
                 start = ko + self.ar[row]
                 length = self.nar[row]
-                keys[start:start + length] = k[qo:qo + length]
-                values[start:start + length] = v[qo:qo + length]
+                keys[start : start + length] = k[qo : qo + length]
+                values[start : start + length] = v[qo : qo + length]
 
-            h = _flash_varlen(q, keys, values, self.cu_q, self.cu_k,
-                              self.max_nar, self.max_total)
+            h = _flash_varlen(
+                q, keys, values, self.cu_q, self.cu_k, self.max_nar, self.max_total
+            )
             attn = layer.nar_self_attn.o_proj(h.reshape(self.sum_nar, HQ * HD))
             kernel.fused_add_rmsnorm(
-                attn, residual, layer.nar_pre_mlp_layernorm.weight, eps)
+                attn, residual, layer.nar_pre_mlp_layernorm.weight, eps
+            )
             gate_up = F.linear(attn, gate_up_w)
             mlp = layer.nar_mlp.down_proj(kernel.silu_and_mul(gate_up))
-            next_weight = (self.layers[index + 1].nar_input_layernorm.weight
-                           if index < self.last else model.model.norm.weight)
+            next_weight = (
+                self.layers[index + 1].nar_input_layernorm.weight
+                if index < self.last
+                else model.model.norm.weight
+            )
             kernel.fused_add_rmsnorm(mlp, residual, next_weight, eps)
             hidden = mlp
 
         out = model.llm2vae(hidden)
-        return [out[self.q_off[row] + 1: self.q_off[row] + self.nar[row] - 1]
-                for row in range(self.n)]
+        return [
+            out[self.q_off[row] + 1 : self.q_off[row] + self.nar[row] - 1]
+            for row in range(self.n)
+        ]
 
     @torch.inference_mode()
     def solve(self, steps):
-        states = [noise.to(device=self.device, dtype=self.dtype) for noise in self.noise]
+        states = [
+            noise.to(device=self.device, dtype=self.dtype) for noise in self.noise
+        ]
         dt = 1.0 / steps
         for step in range(steps):
             t = 1.0 - step * dt
-            raw = torch.logit(torch.tensor(t, dtype=torch.float64)).clamp(-20, 20).item()
+            raw = (
+                torch.logit(torch.tensor(t, dtype=torch.float64)).clamp(-20, 20).item()
+            )
             first = self.velocity(states, raw)
             mid = [state - vel * (dt / 2) for state, vel in zip(states, first)]
-            raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64)).clamp(
-                -20, 20).item()
+            raw_mid = (
+                torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64))
+                .clamp(-20, 20)
+                .item()
+            )
             second = self.velocity(mid, raw_mid)
             states = [state - vel * dt for state, vel in zip(states, second)]
         results = [state.float().cpu() for state in states]
         for result in results:
             if not torch.isfinite(result).all():
                 raise FloatingPointError(
-                    "Acoustic flow matching produced non-finite latents")
+                    "Acoustic flow matching produced non-finite latents"
+                )
         return results
 
 
@@ -342,8 +450,11 @@ def synthesize_batched(model, session, branches, prefix_lens, codecs, seeds, ste
     noises = []
     for codec, seed in zip(codecs, seeds):
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
-        noises.append(torch.randn((len(codec), 64), dtype=torch.float32,
-                                  device="cpu", generator=generator))
+        noises.append(
+            torch.randn(
+                (len(codec), 64), dtype=torch.float32, device="cpu", generator=generator
+            )
+        )
     ar_lengths = [prefix + len(codec) + 1 for prefix, codec in zip(prefix_lens, codecs)]
     return BatchedSessionNAR(model, session, branches, ar_lengths, noises).solve(steps)
 
@@ -381,16 +492,20 @@ class _VelocityGraph(SessionNAR):
         self.nar_length = noise.shape[0] + 2
         with torch.no_grad():
             for index in range(len(self.layers)):
-                self.keys[index][0, :self.ar_length].copy_(
-                    session.keys[index][self.branch, :self.ar_length])
-                self.values[index][0, :self.ar_length].copy_(
-                    session.values[index][self.branch, :self.ar_length])
+                self.keys[index][0, : self.ar_length].copy_(
+                    session.keys[index][self.branch, : self.ar_length]
+                )
+                self.values[index][0, : self.ar_length].copy_(
+                    session.values[index][self.branch, : self.ar_length]
+                )
         self.state_buf.copy_(noise.to(device=self.device, dtype=self.dtype))
 
     @torch.inference_mode()
     def velocity(self, state, raw_t, shifted=None):
         self.state_buf.copy_(state)
-        self.shifted_buf.copy_(self.model._shift_t_value(raw_t, self.device, self.dtype))
+        self.shifted_buf.copy_(
+            self.model._shift_t_value(raw_t, self.device, self.dtype)
+        )
         self.graph.replay()
         return self.output_buf
 
@@ -429,8 +544,19 @@ default_velocity_pool = VelocityGraphPool()
 
 
 @torch.inference_mode()
-def synthesize_from_session(model, session, prefix_len, codec, seed, fed_codec, steps=32,
-                            context=None, cancelled=None, branch=0, feed_tail=True):
+def synthesize_from_session(
+    model,
+    session,
+    prefix_len,
+    codec,
+    seed,
+    fed_codec,
+    steps=32,
+    context=None,
+    cancelled=None,
+    branch=0,
+    feed_tail=True,
+):
     """Fast-path NAR for single-chunk songs whose AR KV already lives in ``session``.
 
     Feeds the unfed codec tail plus ``MUSIC_END`` through the session, then
@@ -446,22 +572,29 @@ def synthesize_from_session(model, session, prefix_len, codec, seed, fed_codec, 
     start, end = ranges[0]
     if start != 0 or end != len(codec):
         raise ValueError("fast NAR path requires full codec coverage")
- 
-    
+
     if feed_tail:
-        for value in [value + CODEC_OFFSET for value in codec[fed_codec:]] + [MUSIC_END]:
-            session.step(torch.tensor([[value]], dtype=torch.long, device=session.device))
+        for value in [value + CODEC_OFFSET for value in codec[fed_codec:]] + [
+            MUSIC_END
+        ]:
+            session.step(
+                torch.tensor([[value]], dtype=torch.long, device=session.device)
+            )
 
     # TODO (yiakwy) : move to setup
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    noise = torch.randn((len(codec), 64), dtype=torch.float32, device="cpu", generator=generator)
+    noise = torch.randn(
+        (len(codec), 64), dtype=torch.float32, device="cpu", generator=generator
+    )
 
     if os.environ.get("SGLANG_YUE2_VELOCITY_GRAPH", "1") == "1":
         engine = default_velocity_pool.acquire(
-            model, session, prefix_len + len(codec) + 1, noise, branch=branch)
+            model, session, prefix_len + len(codec) + 1, noise, branch=branch
+        )
     else:
-        engine = SessionNAR(model, session, prefix_len + len(codec) + 1, noise,
-                            branch=branch)
+        engine = SessionNAR(
+            model, session, prefix_len + len(codec) + 1, noise, branch=branch
+        )
     try:
         return engine.solve(steps)
     finally:

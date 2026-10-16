@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """End-to-end YuE2 generation helpers used by the streaming server."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -60,7 +61,10 @@ def generate_codec_tokens(
         prefix = token_prefixes(request, runtime.tokenizer, abc_ids=abc_ids)
 
         semantic_sampling = config.semantic
-        semantic_kwargs = {**semantic_sampling.__dict__, "max_tokens": int(semantic_max_tokens)}
+        semantic_kwargs = {
+            **semantic_sampling.__dict__,
+            "max_tokens": int(semantic_max_tokens),
+        }
         if semantic_kwargs["min_tokens"] > semantic_kwargs["max_tokens"]:
             semantic_kwargs["min_tokens"] = semantic_kwargs["max_tokens"]
         semantic_sampling = type(semantic_sampling)(**semantic_kwargs)

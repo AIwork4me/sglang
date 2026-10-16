@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Dict, NamedTuple, Optional, Tuple
 
 import torch
 
+from sglang.kernels.jit.utils import make_cpp_args  # sgl-style jit kernel
 from sglang.kernels.jit.utils import (
     KERNEL_PATH,
     aligned_new_empty,
     cache_once,
     load_jit,
-    make_cpp_args, # sgl-style jit kernel
 )
 
 if TYPE_CHECKING:
@@ -247,7 +247,7 @@ def topk(
     if device_capability not in _SUPPORTED_CAPABILITIES:
         major, minor = device_capability
         raise RuntimeError(f"DeepSelect does not support SM{major}{minor}")
-    
+
     cluster_size, cluster_min_vocab_size = _cluster_tuning(device_capability)
 
     use_cluster = (

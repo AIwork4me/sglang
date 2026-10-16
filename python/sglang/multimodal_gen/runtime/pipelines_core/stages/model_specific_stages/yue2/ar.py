@@ -7,7 +7,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-
 from sglang.srt.models.yue2.protocol import (
     GenerationConfig,
     Sampling,
@@ -16,7 +15,6 @@ from sglang.srt.models.yue2.protocol import (
     token_prefixes,
 )
 from sglang.srt.models.yue2.sampling import generate_tokens
-
 
 logger = init_logger(__name__)
 
@@ -35,7 +33,9 @@ class Yue2ARStage(PipelineStage):
         tokenizer = self.tokenizer
 
         generation_config = self._generation_config(batch.sampling_params)
-        cfg_scale = request.cfg_scale if request.cfg_scale is not None else request.guidance
+        cfg_scale = (
+            request.cfg_scale if request.cfg_scale is not None else request.guidance
+        )
 
         started = time.perf_counter()
         if self._session_path_enabled():
@@ -48,15 +48,23 @@ class Yue2ARStage(PipelineStage):
             from sglang.srt.models.yue2.song import song_token_budget
 
             session = default_session_pool.acquire(
-                model, [token_prefixes(request, tokenizer)] if cfg_scale == 1
+                model,
+                [token_prefixes(request, tokenizer)]
+                if cfg_scale == 1
                 else [token_prefixes(request, tokenizer), negative],
-                song_token_budget(generation_config.abc, generation_config.semantic))
+                song_token_budget(generation_config.abc, generation_config.semantic),
+            )
             try:
                 abc_ids, semantic_ids, timing, fed_codec = generate_song_tokens(
-                    model, session, tokenizer, request,
+                    model,
+                    session,
+                    tokenizer,
+                    request,
                     abc_sampling=generation_config.abc,
                     semantic_sampling=generation_config.semantic,
-                    cfg_scale=cfg_scale, negative_prefix_ids=negative)
+                    cfg_scale=cfg_scale,
+                    negative_prefix_ids=negative,
+                )
             except Exception:
                 default_session_pool.release(session)
                 raise
@@ -66,10 +74,14 @@ class Yue2ARStage(PipelineStage):
                     "yue2_abc": abc,
                     "yue2_abc_ids": list(abc_ids),
                     "yue2_semantic_ids": list(semantic_ids),
-                    "yue2_semantic_prefix": token_prefixes(request, tokenizer, abc_ids=abc_ids),
+                    "yue2_semantic_prefix": token_prefixes(
+                        request, tokenizer, abc_ids=abc_ids
+                    ),
                     "yue2_timing": timing,
-                    "yue2_truncated": bool(timing["abc"].get("truncated")
-                                           or timing["semantic"].get("truncated")),
+                    "yue2_truncated": bool(
+                        timing["abc"].get("truncated")
+                        or timing["semantic"].get("truncated")
+                    ),
                     "yue2_session": session,
                     "yue2_fed_codec": int(fed_codec),
                 }
@@ -149,8 +161,9 @@ class Yue2ARStage(PipelineStage):
             return [self(batch, server_args) for batch in batches]
 
         try:
-            return run_batched_ar(self.model, self.tokenizer, batches,
-                                  self._generation_config)
+            return run_batched_ar(
+                self.model, self.tokenizer, batches, self._generation_config
+            )
         except BatchedUnsupported as exc:
             logger.info("Batched YuE2 AR not applicable (%s); running per request", exc)
         except Exception:

@@ -8,7 +8,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-
 from sglang.srt.models.yue2.protocol import SongRequest
 from sglang.srt.models.yue2.tokenization_yue2 import YuE2TextTokenizer
 
@@ -27,7 +26,7 @@ class Yue2Request:
     artifacts_dir: str = ""  # optional per-request artifact export (WSB-style scoring)
 
     @classmethod
-    def from_sampling_params(cls, sampling_params) -> "Yue2Request":
+    def from_sampling_params(cls, sampling_params) -> Yue2Request:
         raw_prompt = sampling_params.prompt
         payload: dict | None = None
         if isinstance(raw_prompt, str) and raw_prompt.lstrip().startswith("{"):

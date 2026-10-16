@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Versioned, checkpoint-native prompting and generation defaults."""
+
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
+
 import math
 import re
+from dataclasses import asdict, dataclass, field
 
 EOD = 151643
 ABC_START, ABC_END = 151847, 151848
@@ -30,9 +32,15 @@ class Sampling:
     max_tokens: int = 9000
 
     def __post_init__(self):
-        if any(type(x) is not int for x in (self.top_k, self.penalty_window, self.min_tokens, self.max_tokens)):
+        if any(
+            type(x) is not int
+            for x in (self.top_k, self.penalty_window, self.min_tokens, self.max_tokens)
+        ):
             raise ValueError("Sampling counts must be integers")
-        if not all(math.isfinite(x) for x in (self.temperature, self.top_p, self.repetition_penalty)):
+        if not all(
+            math.isfinite(x)
+            for x in (self.temperature, self.top_p, self.repetition_penalty)
+        ):
             raise ValueError("Sampling numbers must be finite")
         if not 0 <= self.temperature <= 5 or not 0 < self.top_p <= 1 or self.top_k < 1:
             raise ValueError("Invalid sampling temperature/top_p/top_k")
@@ -44,7 +52,9 @@ class Sampling:
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    abc: Sampling = field(default_factory=lambda: Sampling(.7, .9, 30, 1.005, 100, 32, 4096))
+    abc: Sampling = field(
+        default_factory=lambda: Sampling(0.7, 0.9, 30, 1.005, 100, 32, 4096)
+    )
     semantic: Sampling = field(default_factory=Sampling)
     ode_steps: int = 32
     ode_method: str = "midpoint"
@@ -52,8 +62,15 @@ class GenerationConfig:
     version: str = PROTOCOL_VERSION
 
     def __post_init__(self):
-        if self.context != CONTEXT or self.ode_method != "midpoint" or type(self.ode_steps) is not int or self.ode_steps < 1:
-            raise ValueError("Require context=24576 and midpoint with positive integer steps")
+        if (
+            self.context != CONTEXT
+            or self.ode_method != "midpoint"
+            or type(self.ode_steps) is not int
+            or self.ode_steps < 1
+        ):
+            raise ValueError(
+                "Require context=24576 and midpoint with positive integer steps"
+            )
 
     def to_dict(self):
         return asdict(self)
@@ -64,7 +81,9 @@ class GenerationConfig:
         defaults = cls()
         for key in ("abc", "semantic"):
             if key in value and isinstance(value[key], dict):
-                value[key] = Sampling(**{**asdict(getattr(defaults, key)), **value[key]})
+                value[key] = Sampling(
+                    **{**asdict(getattr(defaults, key)), **value[key]}
+                )
         return cls(**value)
 
 
@@ -95,19 +114,31 @@ class SongRequest:
             raise TypeError("style and lyrics must be strings")
         if type(self.seed) is not int or not 0 <= self.seed < 2**63:
             raise ValueError("seed must be an integer in [0, 2**63)")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", self.id) or self.id in {".", ".."}:
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,179}", self.id
+        ) or self.id in {".", ".."}:
             raise ValueError("id must be a filename-safe identifier")
-        if self.abc is not None and (self.cot == "off" or not isinstance(self.abc, str) or not self.abc.strip()):
+        if self.abc is not None and (
+            self.cot == "off" or not isinstance(self.abc, str) or not self.abc.strip()
+        ):
             raise ValueError("External ABC requires nonempty text and cot=melody/full")
-        if self.cfg_scale is not None and (not math.isfinite(self.cfg_scale) or not 0 <= self.cfg_scale <= 20):
+        if self.cfg_scale is not None and (
+            not math.isfinite(self.cfg_scale) or not 0 <= self.cfg_scale <= 20
+        ):
             raise ValueError("cfg_scale must be finite and in [0,20]")
 
     @property
     def guidance(self):
-        return (1.01 if self.cot == "off" else 1.0) if self.cfg_scale is None else self.cfg_scale
+        return (
+            (1.01 if self.cot == "off" else 1.0)
+            if self.cfg_scale is None
+            else self.cfg_scale
+        )
 
     def text(self):
-        return f"{INSTRUCTIONS[self.cot]}\n[Tags]\n{self.style}\n[Lyrics]\n{self.lyrics}\n"
+        return (
+            f"{INSTRUCTIONS[self.cot]}\n[Tags]\n{self.style}\n[Lyrics]\n{self.lyrics}\n"
+        )
 
     def to_dict(self):
         return asdict(self)

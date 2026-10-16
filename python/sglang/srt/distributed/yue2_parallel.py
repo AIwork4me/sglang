@@ -5,6 +5,7 @@ These helpers keep the sharding policy in one place so the AR, NAR, and VAE
 paths can later opt into sequence parallelism without scattering collective
 logic through model code.
 """
+
 from __future__ import annotations
 
 from typing import Optional

@@ -9,7 +9,9 @@ positions and cache slots. No vLLM, Triton, or custom extension is imported.
 the 28-layer decode graph costs ~35 ms, which every request would otherwise
 pay twice (ABC + semantic phases).
 """
+
 from __future__ import annotations
+
 import os
 import threading
 from numbers import Integral
@@ -19,8 +21,7 @@ import torch.nn.functional as F
 
 from .fa3 import varlen_attention
 
-
-# NOTE (yiakwy) : same to 
+# NOTE (yiakwy) : same to
 #   https://github.com/multimodal-art-projection/YuE/blob/main/src/yue2/cuda_graph.py
 
 # TODO (yiakwy) : switch to Ideogram-4 breakable CUDA graph (BCG) prompt padding.
@@ -41,10 +42,16 @@ def model_fused_weights(model):
         layers = []
         for layer in model.model.layers:
             qkv = torch.cat(
-                [layer.self_attn.q_proj.weight, layer.self_attn.k_proj.weight,
-                 layer.self_attn.v_proj.weight], dim=0).contiguous()
+                [
+                    layer.self_attn.q_proj.weight,
+                    layer.self_attn.k_proj.weight,
+                    layer.self_attn.v_proj.weight,
+                ],
+                dim=0,
+            ).contiguous()
             gate_up = torch.cat(
-                [layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], dim=0).contiguous()
+                [layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], dim=0
+            ).contiguous()
             layers.append((qkv, gate_up))
         model._yue2_fused_weights = layers
         cached = layers
@@ -53,9 +60,12 @@ def model_fused_weights(model):
 
 class _PrefixCache:
     """A single branch view used only by the original eager HF prefill."""
+
     def __init__(self, keys, values, branch):
-        self.key_cache = [value[branch:branch+1].transpose(1, 2) for value in keys]
-        self.value_cache = [value[branch:branch+1].transpose(1, 2) for value in values]
+        self.key_cache = [value[branch : branch + 1].transpose(1, 2) for value in keys]
+        self.value_cache = [
+            value[branch : branch + 1].transpose(1, 2) for value in values
+        ]
         self.seen = 0
 
     def get_seq_length(self, layer_idx=0):
@@ -65,11 +75,13 @@ class _PrefixCache:
         end = self.seen + key.shape[2]
         if end > self.key_cache[layer_idx].shape[2]:
             raise ValueError("Prefix exceeds preallocated KV capacity")
-        self.key_cache[layer_idx][:, :, self.seen:end].copy_(key)
-        self.value_cache[layer_idx][:, :, self.seen:end].copy_(value)
+        self.key_cache[layer_idx][:, :, self.seen : end].copy_(key)
+        self.value_cache[layer_idx][:, :, self.seen : end].copy_(value)
         if layer_idx == len(self.key_cache) - 1:
             self.seen = end
-        return self.key_cache[layer_idx][:, :, :end], self.value_cache[layer_idx][:, :, :end]
+        return self.key_cache[layer_idx][:, :, :end], self.value_cache[layer_idx][
+            :, :, :end
+        ]
 
 
 class GraphAR:
@@ -80,77 +92,180 @@ class GraphAR:
     output storage and remain valid until the next step. ``capture=False`` is
     an eager diagnostic path for CPU/tiny-model correctness checks.
     """
-    def __init__(self, model, prefixes, max_tokens, *, capture=True, attention_backend="auto",
-                 fuse_projections=False, sampler=None):
+
+    def __init__(
+        self,
+        model,
+        prefixes,
+        max_tokens,
+        *,
+        capture=True,
+        attention_backend="auto",
+        fuse_projections=False,
+        sampler=None,
+    ):
         if model.training:
             raise ValueError("GraphAR requires model.eval()")
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, Integral) or max_tokens < 1:
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, Integral)
+            or max_tokens < 1
+        ):
             raise ValueError("max_tokens must be a positive integer")
         prefixes = [list(prefix) for prefix in prefixes]
         if not prefixes:
             raise ValueError("GraphAR requires at least one branch")
         config = model.config
         for prefix in prefixes:
-            if not prefix or any(isinstance(token, bool) or not isinstance(token, Integral) or
-                                 not 0 <= token < config.vocab_size for token in prefix):
+            if not prefix or any(
+                isinstance(token, bool)
+                or not isinstance(token, Integral)
+                or not 0 <= token < config.vocab_size
+                for token in prefix
+            ):
                 raise ValueError("Prefixes require valid integer token IDs")
             if len(prefix) + max_tokens > config.max_position_embeddings:
-                raise ValueError("Prefix plus generation budget exceeds model context; no length was shortened")
+                raise ValueError(
+                    "Prefix plus generation budget exceeds model context; no length was shortened"
+                )
         weight = model.model.embed_tokens.weight
         self.model, self.device, self.dtype = model, weight.device, weight.dtype
-        linears = [module for layer in model.model.layers for module in
-                   (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj,
-                    layer.self_attn.o_proj, layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj)]
+        linears = [
+            module
+            for layer in model.model.layers
+            for module in (
+                layer.self_attn.q_proj,
+                layer.self_attn.k_proj,
+                layer.self_attn.v_proj,
+                layer.self_attn.o_proj,
+                layer.mlp.gate_proj,
+                layer.mlp.up_proj,
+                layer.mlp.down_proj,
+            )
+        ]
         if getattr(model, "_yue2_fp8_originals", None) or any(
-                not isinstance(module, torch.nn.Linear) or module.weight.dtype != self.dtype for module in linears):
-            raise ValueError("GraphAR only supports unquantized standard AR Linear layers; use eager for FP8")
+            not isinstance(module, torch.nn.Linear) or module.weight.dtype != self.dtype
+            for module in linears
+        ):
+            raise ValueError(
+                "GraphAR only supports unquantized standard AR Linear layers; use eager for FP8"
+            )
         if capture and self.device.type != "cuda":
-            raise ValueError("CUDA graphs require a CUDA model; capture=False is for diagnostics")
+            raise ValueError(
+                "CUDA graphs require a CUDA model; capture=False is for diagnostics"
+            )
         self.prefixes = [[int(token) for token in prefix] for prefix in prefixes]
         self.max_tokens, self.branches = int(max_tokens), len(prefixes)
         self.capacity = max(map(len, prefixes)) + self.max_tokens
         self.capture, self.graph, self.output = capture, None, None
         if attention_backend not in {"auto", "flash", "cudnn", "sdpa"}:
             raise ValueError("attention_backend must be auto, flash, cudnn, or sdpa")
-        fused = self.device.type == "cuda" and self.dtype in {torch.bfloat16, torch.float16} and config.head_dim % 8 == 0
-        flash = fused and config.head_dim <= 256 and hasattr(torch.ops.aten, "_flash_attention_forward") and (
-            "seqused_k" in str(torch.ops.aten._flash_attention_forward.default._schema))
+        fused = (
+            self.device.type == "cuda"
+            and self.dtype in {torch.bfloat16, torch.float16}
+            and config.head_dim % 8 == 0
+        )
+        flash = (
+            fused
+            and config.head_dim <= 256
+            and hasattr(torch.ops.aten, "_flash_attention_forward")
+            and (
+                "seqused_k"
+                in str(torch.ops.aten._flash_attention_forward.default._schema)
+            )
+        )
         # Torch 2.10 is pinned by the package. Its native variable-length FA
         # accepts GPU effective lengths; the public masked SDPA can select a
         # much slower math kernel. Keep a cuDNN/public-SDPA fallback explicit.
         if attention_backend == "auto":
-            attention_backend = "flash" if flash else "cudnn" if fused and torch.backends.cudnn.is_available() else "sdpa"
+            attention_backend = (
+                "flash"
+                if flash
+                else "cudnn"
+                if fused and torch.backends.cudnn.is_available()
+                else "sdpa"
+            )
         if attention_backend == "flash" and not flash:
-            raise ValueError("Pinned PyTorch variable-length CUDA FlashAttention is unavailable")
-        if attention_backend == "cudnn" and not (fused and torch.backends.cudnn.is_available()):
-            raise ValueError("cuDNN attention requires a supported CUDA dtype/head dimension")
+            raise ValueError(
+                "Pinned PyTorch variable-length CUDA FlashAttention is unavailable"
+            )
+        if attention_backend == "cudnn" and not (
+            fused and torch.backends.cudnn.is_available()
+        ):
+            raise ValueError(
+                "cuDNN attention requires a supported CUDA dtype/head dimension"
+            )
         self.attention_backend = attention_backend
         self.ready, self.closed, self.steps = False, False, 0
         # Sequence-major layout makes the packed FA view contiguous without
         # copying all cached keys at each decode step.
-        shape = (self.branches, self.capacity, config.num_key_value_heads, config.head_dim)
-        self.keys = [torch.zeros(shape, device=self.device, dtype=self.dtype) for _ in model.model.layers]
-        self.values = [torch.zeros(shape, device=self.device, dtype=self.dtype) for _ in model.model.layers]
-        self.positions = torch.tensor([len(prefix) for prefix in prefixes], dtype=torch.long, device=self.device)
+        shape = (
+            self.branches,
+            self.capacity,
+            config.num_key_value_heads,
+            config.head_dim,
+        )
+        self.keys = [
+            torch.zeros(shape, device=self.device, dtype=self.dtype)
+            for _ in model.model.layers
+        ]
+        self.values = [
+            torch.zeros(shape, device=self.device, dtype=self.dtype)
+            for _ in model.model.layers
+        ]
+        self.positions = torch.tensor(
+            [len(prefix) for prefix in prefixes], dtype=torch.long, device=self.device
+        )
         self.initial_positions = self.positions.clone()
-        self.key_positions = torch.arange(self.capacity, dtype=torch.long, device=self.device)
-        self.cu_q = torch.arange(self.branches + 1, dtype=torch.int32, device=self.device)
+        self.key_positions = torch.arange(
+            self.capacity, dtype=torch.long, device=self.device
+        )
+        self.cu_q = torch.arange(
+            self.branches + 1, dtype=torch.int32, device=self.device
+        )
         self.cu_k = self.cu_q * self.capacity
-        self.tokens = torch.tensor([[prefix[-1]] for prefix in prefixes], dtype=torch.long, device=self.device)
-        self.kv_bytes = 2 * len(self.keys) * self.keys[0].numel() * self.keys[0].element_size()
+        self.tokens = torch.tensor(
+            [[prefix[-1]] for prefix in prefixes], dtype=torch.long, device=self.device
+        )
+        self.kv_bytes = (
+            2 * len(self.keys) * self.keys[0].numel() * self.keys[0].element_size()
+        )
         self.fused_weights = []
         if fuse_projections:
             if any(module.bias is not None for module in linears):
-                raise ValueError("Fused projections require the checkpoint's bias-free AR linears")
+                raise ValueError(
+                    "Fused projections require the checkpoint's bias-free AR linears"
+                )
             with torch.no_grad():
                 for layer in model.model.layers:
-                    self.fused_weights.append((torch.cat([layer.self_attn.q_proj.weight, layer.self_attn.k_proj.weight,
-                                                         layer.self_attn.v_proj.weight], dim=0),
-                                               torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], dim=0)))
-        self.fused_weight_bytes = sum(value.numel() * value.element_size() for pair in self.fused_weights for value in pair)
+                    self.fused_weights.append(
+                        (
+                            torch.cat(
+                                [
+                                    layer.self_attn.q_proj.weight,
+                                    layer.self_attn.k_proj.weight,
+                                    layer.self_attn.v_proj.weight,
+                                ],
+                                dim=0,
+                            ),
+                            torch.cat(
+                                [layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight],
+                                dim=0,
+                            ),
+                        )
+                    )
+        self.fused_weight_bytes = sum(
+            value.numel() * value.element_size()
+            for pair in self.fused_weights
+            for value in pair
+        )
         self.use_fused_kernels = False
-        if _fused_enabled() and self.device.type == "cuda" and \
-                self.dtype in {torch.bfloat16, torch.float16} and not fuse_projections:
+        if (
+            _fused_enabled()
+            and self.device.type == "cuda"
+            and self.dtype in {torch.bfloat16, torch.float16}
+            and not fuse_projections
+        ):
             try:
                 import sgl_kernel  # noqa: F401
 
@@ -158,7 +273,9 @@ class GraphAR:
             except ImportError:
                 self.use_fused_kernels = False
         self.positions_i32 = self.positions.to(torch.int32)
-        self._fused_layer_weights = model_fused_weights(model) if self.use_fused_kernels else None
+        self._fused_layer_weights = (
+            model_fused_weights(model) if self.use_fused_kernels else None
+        )
         self.sampler = sampler
         self.step_mode = sampler is not None
 
@@ -171,21 +288,42 @@ class GraphAR:
         x = backbone.embed_tokens(self.tokens)
         visible = None
         if self.attention_backend != "flash":
-            visible = (self.key_positions[None, :] <= self.positions[:, None])[:, None, None, :]
+            visible = (self.key_positions[None, :] <= self.positions[:, None])[
+                :, None, None, :
+            ]
         used_lengths = (self.positions + 1).to(torch.int32)
         config = self.model.config
         slots = self.positions[:, None, None, None].expand(
-            self.branches, 1, config.num_key_value_heads, config.head_dim)
-        for index, (layer, keys, values) in enumerate(zip(backbone.layers, self.keys, self.values)):
+            self.branches, 1, config.num_key_value_heads, config.head_dim
+        )
+        for index, (layer, keys, values) in enumerate(
+            zip(backbone.layers, self.keys, self.values)
+        ):
             normalized = layer.input_layernorm(x)
             if self.fused_weights:
                 from .modeling_yue2 import _apply_rotary
-                sizes = (config.num_attention_heads * config.head_dim,
-                         config.num_key_value_heads * config.head_dim, config.num_key_value_heads * config.head_dim)
-                q, k, v = F.linear(normalized, self.fused_weights[index][0]).split(sizes, dim=-1)
-                q = layer.self_attn.q_norm(q.view(self.branches, 1, config.num_attention_heads, config.head_dim))
-                k = layer.self_attn.k_norm(k.view(self.branches, 1, config.num_key_value_heads, config.head_dim))
-                v = v.view(self.branches, 1, config.num_key_value_heads, config.head_dim)
+
+                sizes = (
+                    config.num_attention_heads * config.head_dim,
+                    config.num_key_value_heads * config.head_dim,
+                    config.num_key_value_heads * config.head_dim,
+                )
+                q, k, v = F.linear(normalized, self.fused_weights[index][0]).split(
+                    sizes, dim=-1
+                )
+                q = layer.self_attn.q_norm(
+                    q.view(
+                        self.branches, 1, config.num_attention_heads, config.head_dim
+                    )
+                )
+                k = layer.self_attn.k_norm(
+                    k.view(
+                        self.branches, 1, config.num_key_value_heads, config.head_dim
+                    )
+                )
+                v = v.view(
+                    self.branches, 1, config.num_key_value_heads, config.head_dim
+                )
                 q = _apply_rotary(q, cos.unsqueeze(2), sin.unsqueeze(2))
                 k = _apply_rotary(k, cos.unsqueeze(2), sin.unsqueeze(2))
             else:
@@ -198,24 +336,43 @@ class GraphAR:
                 # seqused_k hides each branch's unfilled slots; FA3's varlen
                 # entrypoint honours it too (no custom mask needed).
                 h = varlen_attention(
-                    q[:, 0], keys.view(-1, config.num_key_value_heads, config.head_dim),
+                    q[:, 0],
+                    keys.view(-1, config.num_key_value_heads, config.head_dim),
                     values.view(-1, config.num_key_value_heads, config.head_dim),
-                    self.cu_q, self.cu_k, 1, self.capacity,
-                    seqused_k=used_lengths)[:, None]
+                    self.cu_q,
+                    self.cu_k,
+                    1,
+                    self.capacity,
+                    seqused_k=used_lengths,
+                )[:, None]
             elif self.attention_backend == "cudnn":
                 from torch.nn.attention import SDPBackend, sdpa_kernel
+
                 with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
-                    h = F.scaled_dot_product_attention(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
-                            attn_mask=visible, is_causal=False,
-                            enable_gqa=config.num_attention_heads != config.num_key_value_heads).transpose(1, 2)
+                    h = F.scaled_dot_product_attention(
+                        q.transpose(1, 2),
+                        keys.transpose(1, 2),
+                        values.transpose(1, 2),
+                        attn_mask=visible,
+                        is_causal=False,
+                        enable_gqa=config.num_attention_heads
+                        != config.num_key_value_heads,
+                    ).transpose(1, 2)
             else:
-                h = F.scaled_dot_product_attention(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
-                            attn_mask=visible, is_causal=False,
-                            enable_gqa=config.num_attention_heads != config.num_key_value_heads).transpose(1, 2)
+                h = F.scaled_dot_product_attention(
+                    q.transpose(1, 2),
+                    keys.transpose(1, 2),
+                    values.transpose(1, 2),
+                    attn_mask=visible,
+                    is_causal=False,
+                    enable_gqa=config.num_attention_heads != config.num_key_value_heads,
+                ).transpose(1, 2)
             x = x + layer.self_attn.o_proj(h.reshape(self.branches, 1, -1))
             normalized = layer.post_attention_layernorm(x)
             if self.fused_weights:
-                gate, up = F.linear(normalized, self.fused_weights[index][1]).chunk(2, dim=-1)
+                gate, up = F.linear(normalized, self.fused_weights[index][1]).chunk(
+                    2, dim=-1
+                )
                 x = x + layer.mlp.down_proj(F.silu(gate) * up)
             else:
                 x = x + layer.mlp(normalized)
@@ -236,8 +393,11 @@ class GraphAR:
         backbone = self.model.model
         config = self.model.config
         B, H = self.branches, config.hidden_size
-        HQ, HKV, HD = (config.num_attention_heads, config.num_key_value_heads,
-                       config.head_dim)
+        HQ, HKV, HD = (
+            config.num_attention_heads,
+            config.num_key_value_heads,
+            config.head_dim,
+        )
         eps = config.rms_norm_eps
         residual = backbone.embed_tokens(self.tokens)
         hidden = sgl_kernel.rmsnorm(
@@ -245,47 +405,82 @@ class GraphAR:
         ).view(B, 1, H)
         visible = None
         if self.attention_backend != "flash":
-            visible = (self.key_positions[None, :] <= self.positions[:, None])[:, None, None, :]
+            visible = (self.key_positions[None, :] <= self.positions[:, None])[
+                :, None, None, :
+            ]
         used_lengths = (self.positions + 1).to(torch.int32)
         slots = self.positions[:, None, None, None].expand(B, 1, HKV, HD)
         last = len(backbone.layers) - 1
-        for index, (layer, keys, values) in enumerate(zip(backbone.layers, self.keys, self.values)):
+        for index, (layer, keys, values) in enumerate(
+            zip(backbone.layers, self.keys, self.values)
+        ):
             qkv_w, gate_up_w = self._fused_layer_weights[index]
             qkv = F.linear(hidden.view(B, H), qkv_w)
             sgl_kernel.fused_qk_norm_rope(
-                qkv, HQ, HKV, HKV, HD, eps,
-                layer.self_attn.q_norm.weight, layer.self_attn.k_norm.weight,
-                config.rope_theta, True, self.positions_i32, 1.0, 0.0, 0.0, 1.0,
+                qkv,
+                HQ,
+                HKV,
+                HKV,
+                HD,
+                eps,
+                layer.self_attn.q_norm.weight,
+                layer.self_attn.k_norm.weight,
+                config.rope_theta,
+                True,
+                self.positions_i32,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
             )
             q = qkv[:, : HQ * HD].view(B, 1, HQ, HD)
-            k = qkv[:, HQ * HD: (HQ + HKV) * HD].view(B, 1, HKV, HD)
-            v = qkv[:, (HQ + HKV) * HD:].view(B, 1, HKV, HD)
+            k = qkv[:, HQ * HD : (HQ + HKV) * HD].view(B, 1, HKV, HD)
+            v = qkv[:, (HQ + HKV) * HD :].view(B, 1, HKV, HD)
             keys.scatter_(1, slots, k)
             values.scatter_(1, slots, v)
             if self.attention_backend == "flash":
                 h = varlen_attention(
-                    q[:, 0], keys.view(-1, HKV, HD), values.view(-1, HKV, HD),
-                    self.cu_q, self.cu_k, 1, self.capacity,
-                    seqused_k=used_lengths)[:, None]
+                    q[:, 0],
+                    keys.view(-1, HKV, HD),
+                    values.view(-1, HKV, HD),
+                    self.cu_q,
+                    self.cu_k,
+                    1,
+                    self.capacity,
+                    seqused_k=used_lengths,
+                )[:, None]
             elif self.attention_backend == "cudnn":
                 from torch.nn.attention import SDPBackend, sdpa_kernel
+
                 with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
                     h = F.scaled_dot_product_attention(
-                        q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
-                        attn_mask=visible, is_causal=False, enable_gqa=HQ != HKV,
+                        q.transpose(1, 2),
+                        keys.transpose(1, 2),
+                        values.transpose(1, 2),
+                        attn_mask=visible,
+                        is_causal=False,
+                        enable_gqa=HQ != HKV,
                     ).transpose(1, 2)
             else:
                 h = F.scaled_dot_product_attention(
-                    q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2),
-                    attn_mask=visible, is_causal=False, enable_gqa=HQ != HKV,
+                    q.transpose(1, 2),
+                    keys.transpose(1, 2),
+                    values.transpose(1, 2),
+                    attn_mask=visible,
+                    is_causal=False,
+                    enable_gqa=HQ != HKV,
                 ).transpose(1, 2)
             attn = layer.self_attn.o_proj(h.reshape(B, 1, -1)).view(B, H)
             sgl_kernel.fused_add_rmsnorm(
-                attn, residual.view(B, H), layer.post_attention_layernorm.weight, eps)
+                attn, residual.view(B, H), layer.post_attention_layernorm.weight, eps
+            )
             gate_up = F.linear(attn, gate_up_w)
             mlp = layer.mlp.down_proj(sgl_kernel.silu_and_mul(gate_up))
-            next_weight = (backbone.layers[index + 1].input_layernorm.weight
-                           if index < last else backbone.norm.weight)
+            next_weight = (
+                backbone.layers[index + 1].input_layernorm.weight
+                if index < last
+                else backbone.norm.weight
+            )
             sgl_kernel.fused_add_rmsnorm(mlp, residual.view(B, H), next_weight, eps)
             # fused_add_rmsnorm writes the normed stream into its first
             # argument, so after the final call ``mlp`` holds
@@ -364,8 +559,9 @@ class GraphAR:
                 raise ValueError("Token is outside the model vocabulary")
             self.tokens.fill_(int(token))
         else:
-            self.tokens.copy_(torch.tensor([[int(token)]], device=self.device,
-                                           dtype=torch.long))
+            self.tokens.copy_(
+                torch.tensor([[int(token)]], device=self.device, dtype=torch.long)
+            )
         result = self._decode()
         self.steps += 1
         return result
@@ -377,8 +573,12 @@ class GraphAR:
         logits = []
         for branch, prefix in enumerate(self.prefixes):
             cache = _PrefixCache(self.keys, self.values, branch)
-            result = self.model(torch.tensor([prefix], dtype=torch.long, device=self.device),
-                                past_key_values=cache, use_cache=True, logits_to_keep=1)
+            result = self.model(
+                torch.tensor([prefix], dtype=torch.long, device=self.device),
+                past_key_values=cache,
+                use_cache=True,
+                logits_to_keep=1,
+            )
             logits.append(result.logits[:, -1])
         result = torch.cat(logits, dim=0)
         if self.capture and self.max_tokens > 1 and self.graph is None:
@@ -393,17 +593,26 @@ class GraphAR:
             # explicit token decode must go through the eager path.
             return self.step_eager(token)
         if self.closed or not self.ready:
-            raise RuntimeError("Call prefill before step and do not use a closed GraphAR")
+            raise RuntimeError(
+                "Call prefill before step and do not use a closed GraphAR"
+            )
         if self.steps >= self.max_tokens - 1:
             raise ValueError("Requested generation budget is exhausted")
         if isinstance(token, Integral) and not isinstance(token, bool):
             if not 0 <= int(token) < self.model.config.vocab_size:
                 raise ValueError("Token is outside the model vocabulary")
             self.tokens.fill_(int(token))
-        elif isinstance(token, torch.Tensor) and token.numel() == 1 and token.dtype in {torch.int32, torch.int64}:
+        elif (
+            isinstance(token, torch.Tensor)
+            and token.numel() == 1
+            and token.dtype in {torch.int32, torch.int64}
+        ):
             # Sampling already produced/validated this scalar. Copying the
             # tensor avoids a second GPU-to-CPU synchronization in the caller.
-            if token.device.type == "cpu" and not 0 <= token.item() < self.model.config.vocab_size:
+            if (
+                token.device.type == "cpu"
+                and not 0 <= token.item() < self.model.config.vocab_size
+            ):
                 raise ValueError("Token is outside the model vocabulary")
             self.tokens.copy_(token.reshape(1, 1).expand(self.branches, 1))
         else:
@@ -423,7 +632,9 @@ class GraphAR:
         self.fused_weights.clear()
         self._fused_layer_weights = None
         self.positions_i32 = None
-        self.tokens = self.positions = self.initial_positions = self.key_positions = None
+        self.tokens = self.positions = self.initial_positions = self.key_positions = (
+            None
+        )
         self.cu_q = self.cu_k = None
         self.closed = True
 
@@ -450,10 +661,20 @@ class GraphAR:
         self.steps = 0
         self.ready = False
         with torch.no_grad():
-            self.tokens.copy_(torch.tensor([[prefix[-1]] for prefix in prefixes],
-                                           dtype=torch.long, device=self.device))
-            self.positions.copy_(torch.tensor([len(prefix) for prefix in prefixes],
-                                              dtype=torch.long, device=self.device))
+            self.tokens.copy_(
+                torch.tensor(
+                    [[prefix[-1]] for prefix in prefixes],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            )
+            self.positions.copy_(
+                torch.tensor(
+                    [len(prefix) for prefix in prefixes],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            )
             self.initial_positions.copy_(self.positions)
             self.positions_i32.copy_(self.positions)
 
@@ -510,8 +731,10 @@ class GraphSessionPool:
 
     def stats(self) -> dict:
         with self._lock:
-            return {"live_sessions": self._live,
-                    "idle": {str(k): len(v) for k, v in self._idle.items()}}
+            return {
+                "live_sessions": self._live,
+                "idle": {str(k): len(v) for k, v in self._idle.items()},
+            }
 
 
 default_session_pool = GraphSessionPool()

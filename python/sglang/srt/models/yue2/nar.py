@@ -30,7 +30,9 @@ class Chunk:
 
 def _integers(values, name):
     result = list(values)
-    if not result or any(isinstance(v, bool) or not isinstance(v, Integral) for v in result):
+    if not result or any(
+        isinstance(v, bool) or not isinstance(v, Integral) for v in result
+    ):
         raise ValueError(f"{name} must be a nonempty sequence of integer token IDs")
     return [int(v) for v in result]
 
@@ -43,13 +45,24 @@ def song_chunks(prefix, codec, seed, context=CONTEXT):
         raise ValueError("Token IDs are outside their allowed vocabulary")
     if isinstance(seed, bool) or not isinstance(seed, Integral):
         raise ValueError("seed must be an integer")
-    if isinstance(context, bool) or not isinstance(context, Integral) or not 1 <= context <= CONTEXT:
+    if (
+        isinstance(context, bool)
+        or not isinstance(context, Integral)
+        or not 1 <= context <= CONTEXT
+    ):
         raise ValueError(f"context must be an integer in 1..{CONTEXT}")
     ranges = chunk_ranges(len(codec), len(prefix), int(context))
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    noise = torch.randn((len(codec), 64), dtype=torch.float32, device="cpu", generator=generator)
-    return [Chunk(prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END], noise[a:b])
-            for a, b in ranges]
+    noise = torch.randn(
+        (len(codec), 64), dtype=torch.float32, device="cpu", generator=generator
+    )
+    return [
+        Chunk(
+            prefix + [value + CODEC_OFFSET for value in codec[a:b]] + [MUSIC_END],
+            noise[a:b],
+        )
+        for a, b in ranges
+    ]
 
 
 def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
@@ -68,22 +81,33 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
         raise ValueError("Causal prefill requires matching Q/K sequence lengths")
     if backend == "flash" and q.device.type != "cuda":
         raise ValueError("Explicit flash SDPA requires a CUDA device")
-    if query_chunk_size is not None and (isinstance(query_chunk_size, bool) or
-                                        not isinstance(query_chunk_size, Integral) or query_chunk_size < 1):
+    if query_chunk_size is not None and (
+        isinstance(query_chunk_size, bool)
+        or not isinstance(query_chunk_size, Integral)
+        or query_chunk_size < 1
+    ):
         raise ValueError("query_chunk_size must be a positive integer")
-    block = query_chunk_size or (len(q) if q.device.type == "cuda" and backend != "math" else 256)
+    block = query_chunk_size or (
+        len(q) if q.device.type == "cuda" and backend != "math" else 256
+    )
     query = q.transpose(0, 1).unsqueeze(0)
     key = k.transpose(0, 1).unsqueeze(0)
     value = v.transpose(0, 1).unsqueeze(0)
     grouped = query.shape[1] != key.shape[1]
     if grouped and q.device.type == "mps":
         groups = query.shape[1] // key.shape[1]
-        key, value = key.repeat_interleave(groups, 1), value.repeat_interleave(groups, 1)
+        key, value = (
+            key.repeat_interleave(groups, 1),
+            value.repeat_interleave(groups, 1),
+        )
         grouped = False
     context = nullcontext()
     if backend != "sdpa":
         from torch.nn.attention import SDPBackend, sdpa_kernel
-        context = sdpa_kernel(SDPBackend.MATH if backend == "math" else SDPBackend.FLASH_ATTENTION)
+
+        context = sdpa_kernel(
+            SDPBackend.MATH if backend == "math" else SDPBackend.FLASH_ATTENTION
+        )
     outputs = []
     with context:
         for start in range(0, len(q), block):
@@ -94,12 +118,20 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
             # later query block needs its absolute query positions explicitly.
             mask = None
             if causal and start:
-                mask = (torch.arange(end, device=q.device)[None, :] <=
-                        torch.arange(start, end, device=q.device)[:, None])
-            outputs.append(F.scaled_dot_product_attention(
-                query[..., start:end, :], used_key, used_value,
-                attn_mask=mask, is_causal=causal and start == 0, enable_gqa=grouped,
-            ))
+                mask = (
+                    torch.arange(end, device=q.device)[None, :]
+                    <= torch.arange(start, end, device=q.device)[:, None]
+                )
+            outputs.append(
+                F.scaled_dot_product_attention(
+                    query[..., start:end, :],
+                    used_key,
+                    used_value,
+                    attn_mask=mask,
+                    is_causal=causal and start == 0,
+                    enable_gqa=grouped,
+                )
+            )
     return torch.cat(outputs, dim=-2)[0].transpose(0, 1)
 
 
@@ -116,22 +148,41 @@ class CachedNAR:
         if not torch.isfinite(chunk.noise).all():
             raise ValueError("Acoustic noise contains non-finite values")
         self.ar_length, self.nar_length = len(chunk.ar_tokens), len(chunk.noise) + 2
-        if self.ar_length < 1 or min(chunk.ar_tokens) < 0 or max(chunk.ar_tokens) >= model.config.vocab_size:
+        if (
+            self.ar_length < 1
+            or min(chunk.ar_tokens) < 0
+            or max(chunk.ar_tokens) >= model.config.vocab_size
+        ):
             raise ValueError("AR prefix is empty or outside the model vocabulary")
         if self.ar_length + self.nar_length > model.config.max_position_embeddings:
             raise ValueError("Original acoustic chunk exceeds the model context")
         if chunk.nar_cond_end < 0:
             raise ValueError("nar_cond_end must be nonnegative")
-        self.visible_length = min(chunk.nar_cond_end, self.ar_length) if chunk.nar_cond_end else self.ar_length
-        positions = torch.arange(self.ar_length, self.ar_length + self.nar_length, device=self.device)[None]
+        self.visible_length = (
+            min(chunk.nar_cond_end, self.ar_length)
+            if chunk.nar_cond_end
+            else self.ar_length
+        )
+        positions = torch.arange(
+            self.ar_length, self.ar_length + self.nar_length, device=self.device
+        )[None]
         self.cos, self.sin = model.model.rotary_emb(positions)
-        local = torch.arange(self.nar_length, device=self.device).clamp(max=model.config.max_latent_frames - 1)
+        local = torch.arange(self.nar_length, device=self.device).clamp(
+            max=model.config.max_latent_frames - 1
+        )
         self.pos_emb = model.latent_pos_embed(local)[None]
         self.cache = []
         self._prefill()
 
     def _attention(self, q, k, v, causal=False):
-        return attention(q, k, v, causal=causal, backend=self.backend, query_chunk_size=self.query_chunk_size)
+        return attention(
+            q,
+            k,
+            v,
+            causal=causal,
+            backend=self.backend,
+            query_chunk_size=self.query_chunk_size,
+        )
 
     @torch.inference_mode()
     def _prefill(self):
@@ -144,7 +195,7 @@ class CachedNAR:
             q, k, v = layer.self_attn.project_qkv(layer.input_layernorm(x), cos, sin)
             # Clone only for restricted visibility; a slice would retain the
             # storage of invisible codec tokens for every layer.
-            cached = (k[0, :self.visible_length], v[0, :self.visible_length])
+            cached = (k[0, : self.visible_length], v[0, : self.visible_length])
             if self.visible_length != self.ar_length:
                 cached = tuple(t.clone() for t in cached)
             self.cache.append(cached)
@@ -163,7 +214,9 @@ class CachedNAR:
         x = x + model.time_embedder(shifted.expand(self.nar_length))[None]
         x = x + self.pos_emb
         for layer, (ar_k, ar_v) in zip(model.model.layers, self.cache):
-            q, k, v = layer.nar_self_attn.project_qkv(layer.nar_input_layernorm(x), self.cos, self.sin)
+            q, k, v = layer.nar_self_attn.project_qkv(
+                layer.nar_input_layernorm(x), self.cos, self.sin
+            )
             k, v = torch.cat((ar_k, k[0])), torch.cat((ar_v, v[0]))
             h = self._attention(q[0], k, v)
             x = x + layer.nar_self_attn.o_proj(h.flatten(1)[None])
@@ -171,8 +224,12 @@ class CachedNAR:
         return model.llm2vae(model.model.norm(x))[0, 1:-1]
 
     @torch.inference_mode()
-    def solve(self, steps=32, cancelled: Callable[[], bool] | None = None,
-              on_progress: Callable[[int, int], None] | None = None):
+    def solve(
+        self,
+        steps=32,
+        cancelled: Callable[[], bool] | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ):
         """Solve a chunk, reporting each submitted midpoint step without syncing.
 
         CUDA work may still be executing when ``on_progress`` runs. The existing
@@ -187,18 +244,28 @@ class CachedNAR:
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
             t = 1.0 - step * dt
-            raw = torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
+            raw = (
+                torch.logit(torch.tensor(t, dtype=torch.float64, device="cpu"))
+                .clamp(-20, 20)
+                .item()
+            )
             first = self.velocity(state, raw)
             mid = state - first * (dt / 2)
             if cancelled is not None and cancelled():
                 raise InterruptedError("Cancelled during acoustic flow matching")
-            raw_mid = torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu")).clamp(-20, 20).item()
+            raw_mid = (
+                torch.logit(torch.tensor(t - dt / 2, dtype=torch.float64, device="cpu"))
+                .clamp(-20, 20)
+                .item()
+            )
             state = state - self.velocity(mid, raw_mid) * dt
             if on_progress is not None:
                 on_progress(step + 1, int(steps))
         result = state.float().cpu()
         if not torch.isfinite(result).all():
-            raise FloatingPointError("Acoustic flow matching produced non-finite latents")
+            raise FloatingPointError(
+                "Acoustic flow matching produced non-finite latents"
+            )
         return result
 
     def close(self):
@@ -211,7 +278,14 @@ def _offload_ar(model, enabled):
     """Temporarily move unused AR modules; this model cannot serve concurrently."""
     modules = [model.model.embed_tokens, model.lm_head]
     for layer in model.model.layers:
-        modules.extend((layer.input_layernorm, layer.self_attn, layer.post_attention_layernorm, layer.mlp))
+        modules.extend(
+            (
+                layer.input_layernorm,
+                layer.self_attn,
+                layer.post_attention_layernorm,
+                layer.mlp,
+            )
+        )
     moved = []
     try:
         if enabled:
@@ -229,10 +303,19 @@ def _offload_ar(model, enabled):
 
 
 @torch.inference_mode()
-def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
-               steps=32, context=CONTEXT, attention="sdpa", offload_ar=False,
-               cancelled=None, query_chunk_size=None,
-               on_progress: Callable[[int, int], None] | None = None):
+def synthesize(
+    model,
+    prefix: Sequence[int],
+    codec: Sequence[int],
+    seed: int,
+    steps=32,
+    context=CONTEXT,
+    attention="sdpa",
+    offload_ar=False,
+    cancelled=None,
+    query_chunk_size=None,
+    on_progress: Callable[[int, int], None] | None = None,
+):
     """Return CPU FP32 [frames,64] latents, solving original chunks serially.
 
     Defaults preserve the release protocol. Explicit steps/context overrides
@@ -256,8 +339,12 @@ def synthesize(model, prefix: Sequence[int], codec: Sequence[int], seed: int,
             try:
                 progress = None
                 if on_progress is not None:
+
                     def progress(completed, total):
-                        on_progress(chunk_index * total + completed, total * len(chunks))
+                        on_progress(
+                            chunk_index * total + completed, total * len(chunks)
+                        )
+
                 output.append(engine.solve(steps, cancelled, on_progress=progress))
             finally:
                 engine.close()
