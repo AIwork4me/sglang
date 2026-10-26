@@ -543,12 +543,7 @@ def create_app(
         import importlib.util
         from pathlib import Path as _Path
 
-        _route_path = (
-            _Path(__file__).resolve().parents[5]
-            / "experimental"
-            / "yue2"
-            / "http_api.py"
-        )
+        _route_path = _Path(__file__).resolve().parents[5] / "yue2" / "http_api.py"
         if _route_path.is_file():
             _spec = importlib.util.spec_from_file_location(
                 "sglang_yue2_http_api", _route_path
