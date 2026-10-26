@@ -160,17 +160,33 @@ def _dequant_mxfp4_to_bf16(
 
 
 if _is_hip:
-    from aiter import gemm_a4w4 as _gemm_a4w4_orig
-    from aiter import per_1x32_f4_quant_hip as _per_1x32_f4_quant_hip_orig
-    from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
-        fused_gemm_afp4wfp4_split_cat as _fused_gemm_afp4wfp4_split_cat_orig,
-    )
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4 as _gemm_afp4wfp4_orig
-    from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import (
-        gemm_afp4wfp4_pre_quant as _gemm_afp4wfp4_pre_quant_orig,
-    )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant as _dynamic_mxfp4_quant_orig
+    # ROCm portability guard: aiter only ships for Instinct CDNA targets
+    # (gfx94x/gfx95x). On other HIP devices (e.g. gfx1151) the package is
+    # absent; import failure must not break module import for unrelated
+    # models. The registered ops raise at call time if the W4A4-MXFP4 scheme
+    # is actually requested without aiter, which YuE2 (bf16) never does.
+    # [merge-readiness overlay — candidate for an independent upstream main
+    # PR, not part of the YuE2 PR]
+    try:
+        from aiter import gemm_a4w4 as _gemm_a4w4_orig
+        from aiter import per_1x32_f4_quant_hip as _per_1x32_f4_quant_hip_orig
+        from aiter.ops.shuffle import shuffle_weight
+        from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
+            fused_gemm_afp4wfp4_split_cat as _fused_gemm_afp4wfp4_split_cat_orig,
+        )
+        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4 as _gemm_afp4wfp4_orig
+        from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import (
+            gemm_afp4wfp4_pre_quant as _gemm_afp4wfp4_pre_quant_orig,
+        )
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant as _dynamic_mxfp4_quant_orig
+    except ImportError:
+        _gemm_a4w4_orig = None
+        _per_1x32_f4_quant_hip_orig = None
+        shuffle_weight = None
+        _fused_gemm_afp4wfp4_split_cat_orig = None
+        _gemm_afp4wfp4_orig = None
+        _gemm_afp4wfp4_pre_quant_orig = None
+        _dynamic_mxfp4_quant_orig = None
 
     def _aiter_gemm_afp4wfp4(
         x: torch.Tensor,

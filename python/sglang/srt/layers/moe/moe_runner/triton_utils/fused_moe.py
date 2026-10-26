@@ -70,7 +70,16 @@ if _is_cuda:
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
-    from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+    except ImportError:
+        # ROCm hosts without a usable sgl_kernel wheel (e.g. gfx1151 APUs,
+        # CUDA-only PyPI build) cannot import the activation ops. Bind to
+        # None so import-time discovery succeeds; any caller that actually
+        # needs them fails loudly at call time instead of breaking every
+        # server start. [merge-readiness overlay — candidate for an
+        # independent upstream main PR, not part of the YuE2 PR]
+        gelu_and_mul = gelu_tanh_and_mul = silu_and_mul = None
 
     if _use_aiter:
         try:

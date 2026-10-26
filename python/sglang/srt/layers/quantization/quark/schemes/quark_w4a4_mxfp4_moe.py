@@ -116,7 +116,12 @@ _shuffle_moe_gfx1250 = (
 )
 
 if _is_hip:
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    try:
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    except ImportError:
+        # ROCm portability guard (non-CDNA HIP hosts lack aiter);
+        # [merge-readiness overlay — independent-main-PR candidate]
+        dynamic_mxfp4_quant = None
 else:
     dynamic_mxfp4_quant = None
 
