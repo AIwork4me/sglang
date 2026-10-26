@@ -29,6 +29,10 @@ import types
 import pytest
 import torch
 
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=5, suite="base-a-test-cpu")
+
 from sglang.srt.models.yue2 import batched
 from sglang.srt.models.yue2 import fa3 as fa3_module
 from sglang.srt.models.yue2 import fastpath, song
@@ -37,7 +41,7 @@ SHARED_FA_MODULE = "sglang.kernels.ops.attention.flash_attention"
 
 
 class FakeBackend:
-    """Stands in for the in-tree sglang.kernels.ops.deep_select module."""
+    """Stands in for the in-tree sglang.srt.models.yue2._deep_select module."""
 
     def __init__(self, supported: bool | None, exc: Exception | None = None):
         self._supported = supported
@@ -110,8 +114,14 @@ def test_pip_backend_without_probe_keeps_original_check(backend_caches, monkeypa
     fastpath._IN_TREE = False
     fastpath._PIP = pip_backend
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    # A probe-less pip backend keeps the original availability check on CUDA
+    # builds; a CUDA-only JIT wheel can never run under HIP, so the fallback
+    # is excluded there regardless of torch.cuda.is_available().
+    monkeypatch.setattr(torch.version, "hip", None)
     assert fastpath.deepselect_runnable() is True
     assert fastpath.fast_sampler_available() is True
+    monkeypatch.setattr(torch.version, "hip", "test-hip-build")
+    assert fastpath.deepselect_runnable() is False
 
 
 def test_fast_sampler_env_override_still_wins(backend_caches, monkeypatch):
@@ -411,6 +421,10 @@ def test_batched_ar_survives_fast_sampler_env_disable_on_cuda(
 
 
 def test_real_in_tree_backend_wiring(backend_caches):
-    deep_select = pytest.importorskip("sglang.kernels.ops.deep_select")
+    deep_select = pytest.importorskip("sglang.srt.models.yue2._deep_select")
     backend_caches(deep_select)
     assert fastpath.deepselect_runnable() == deep_select.is_deepselect_supported()
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__]))

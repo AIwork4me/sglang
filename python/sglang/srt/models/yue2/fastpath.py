@@ -33,7 +33,7 @@ def _load_topk_backend():
     global _IN_TREE, _PIP
     if _IN_TREE is None:
         try:
-            from sglang.kernels.ops import deep_select as module
+            from sglang.srt.models.yue2 import _deep_select as module
 
             _IN_TREE = module
         except ImportError:
@@ -56,7 +56,8 @@ def deepselect_runnable() -> bool:
     also true on ROCm, where calling the kernel raises at decode time. The
     in-tree wrapper therefore exposes ``is_deepselect_supported()``; backends
     without the probe (pip ``deep_select``) keep the original availability
-    check. Capability-detection errors fail safe to the reference path.
+    check but are still excluded on HIP, where the CUDA-only JIT cannot run.
+    Capability-detection errors fail safe to the reference path.
     """
     backend = _load_topk_backend()
     if not backend:
@@ -64,7 +65,7 @@ def deepselect_runnable() -> bool:
     probe = getattr(backend, "is_deepselect_supported", None)
     try:
         if probe is None:
-            return torch.cuda.is_available()
+            return torch.version.hip is None and torch.cuda.is_available()
         return bool(probe())
     except Exception:
         return False
