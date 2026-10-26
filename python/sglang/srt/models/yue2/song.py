@@ -25,6 +25,7 @@ from .fastpath import (
 from .protocol import ABC_END, MUSIC_END, Sampling, SongRequest, token_prefixes
 from .sampling import _decode_loop, synchronize
 
+
 @torch.inference_mode()
 def generate_song_tokens(
     model,

@@ -29,8 +29,7 @@ def _load_varlen():
     global _VARLEN, _LOADED
     if not _LOADED:
         _LOADED = True
-        if (os.environ.get("SGLANG_YUE2_FA3", "1") == "1"
-                and torch.version.hip is None):
+        if os.environ.get("SGLANG_YUE2_FA3", "1") == "1" and torch.version.hip is None:
             try:
                 from sglang.kernels.ops.attention.flash_attention import (
                     flash_attn_varlen_func,
